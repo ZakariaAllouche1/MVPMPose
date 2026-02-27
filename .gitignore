@@ -309,7 +309,7 @@ pyrightconfig.json
 /videos/
 /finished/
 .vscode/
-pretrained_models/
+
 *.pt
 
 # --- Autoriser les données prétraitées ---

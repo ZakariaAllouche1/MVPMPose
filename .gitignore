@@ -308,7 +308,9 @@ pyrightconfig.json
 
 /videos/
 /finished/
-yolov8x-seg.pt
+.vscode/
+pretrained_models/
+*.pt
 
 # --- Autoriser les données prétraitées ---
 !data/preprocessed/

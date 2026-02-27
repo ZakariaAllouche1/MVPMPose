@@ -2344,7 +2344,7 @@ class RobustMultiViewTracker:
 
 def main():
     BASE_VIDEOS_PATH = r"\\intram\Paris\Labo\IBHGC\PROJETS\metasport\DATA\METASPORT11\Session1\Files\fichiers_video\Bruts" 
-    BASE_OUTPUT_PATH = "./videos_V3/ResultsMETASPORT11Rtmlib_V3" 
+    BASE_OUTPUT_PATH = "./results/videos_V3/ResultsMETASPORT11Rtmlib_V3" 
     os.makedirs(BASE_OUTPUT_PATH, exist_ok=True)
     print(f"Dossier de sortie principal: {BASE_OUTPUT_PATH}")
     

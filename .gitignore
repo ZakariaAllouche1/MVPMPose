@@ -308,7 +308,7 @@ pyrightconfig.json
 
 /videos/
 /finished/
-
+yolov8x-seg.pt
 
 # --- Autoriser les données prétraitées ---
 !data/preprocessed/

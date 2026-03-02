@@ -3,9 +3,10 @@ import sys
 from pathlib import Path
 
 SCRIPTS = [
-    "script1.py",
-    "script2.py",
-    "script3.py",
+    "Codeocclusion.py",
+    "Codeocclusion_V2.py",
+    "Codeocclusion_V3.py",
+    "Codeocclusion_V2_detect.py",
 ]
 
 def run(script_name: str) -> int:

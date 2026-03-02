@@ -9,23 +9,26 @@ import numpy as np
 from ultralytics import YOLO
 
 
-# ---- Config ----
-DATA_DIR = Path(r"\\intram\Paris\Labo\IBHGC\PROJETS\metasport\DATA")          # ton dossier "data"
+DATA_DIR = Path(r"\\intram\Paris\Labo\IBHGC\PROJETS\metasport\DATA")
 OUT_DIR = Path("./yolo_dataset")
 
-MODE = "detect"                    # "detect" ou "seg"
-MODEL_PATH = "yolov8x.pt" if MODE == "detect" else "yolov8x-seg.pt"
+MODE = "detect"  # "detect" ou "seg"
+MODEL_PATH = "yolo26x.pt" if MODE == "detect" else "yolo26x-seg.pt"
 
-TARGET_SUBJECTS = ["10", "11", "12"]  # [] = tous les sujets (match sur le nom du dossier sujet)
+# Mets ici les noms EXACTS des dossiers sujets sous DATA_DIR
+SUBJECT_NAMES = ["METASPORT10", "METASPORT11", "METASPORT12"]
+
 SESSION_NAME = "session1"
+FILES_NAME = "files"
+VIDEO_FOLDER_NAME = "fichiers_video"
 BRUTS_NAME = "Bruts"
 
-STRIDE_OCC = 5
-STRIDE_NO_OCC = 25
-STRIDE_DEFAULT = 10
-OCCLUSION_TRIAL_KEYWORDS = []
-NO_OCCLUSION_TRIAL_KEYWORDS = []
+BRUTS_DIRS = [
+    DATA_DIR / s / SESSION_NAME / FILES_NAME / VIDEO_FOLDER_NAME / BRUTS_NAME
+    for s in SUBJECT_NAMES
+]
 
+STRIDE = 10
 MAX_PER_VIDEO = 0
 RESIZE_TO = None
 
@@ -57,13 +60,18 @@ def clear_dir(p: Path) -> None:
             shutil.rmtree(f)
 
 
-def choose_stride(trial_name: str) -> int:
-    t = trial_name.lower()
-    if any(k.lower() in t for k in OCCLUSION_TRIAL_KEYWORDS):
-        return STRIDE_OCC
-    if any(k.lower() in t for k in NO_OCCLUSION_TRIAL_KEYWORDS):
-        return STRIDE_NO_OCC
-    return STRIDE_DEFAULT
+def reset_output(out_root: Path) -> None:
+    for sub in [
+        out_root / "images" / "all",
+        out_root / "labels" / "all",
+        out_root / "images" / "train",
+        out_root / "images" / "val",
+        out_root / "labels" / "train",
+        out_root / "labels" / "val",
+        out_root / "preview",
+    ]:
+        sub.mkdir(parents=True, exist_ok=True)
+        clear_dir(sub)
 
 
 def safe_imwrite(path: Path, img: np.ndarray) -> None:
@@ -72,92 +80,43 @@ def safe_imwrite(path: Path, img: np.ndarray) -> None:
         raise RuntimeError(f"cv2.imwrite failed: {path}")
 
 
-def find_subject_dirs(data_dir: Path, targets: List[str]) -> List[Path]:
-    subs = [p for p in data_dir.iterdir() if p.is_dir()]
-    if not targets:
-        return sorted(subs)
-    out = []
-    for p in subs:
-        name = p.name
-        if any(t in name for t in targets):
-            out.append(p)
-    return sorted(out)
-
-
-def find_bruts_dirs(subject_dir: Path) -> List[Path]:
-    bruts = []
-    for p in subject_dir.rglob(BRUTS_NAME):
-        if not p.is_dir():
-            continue
-        parts = set(p.parts)
-        if SESSION_NAME in parts and "fichiers_video" in parts:
-            bruts.append(p)
-    return sorted(bruts)
-
-
 def trial_from_video_name(vp: Path) -> str:
-    # jump1.CAM01.avi -> "jump1"
-    return vp.stem.split(".")[0]
+    # CMJump_01.xxxxxx.avi -> CMJump_01
+    return vp.name.split(".", 1)[0]
 
 
-def list_packs_from_bruts(bruts_dir: Path) -> List[Tuple[Path, str]]:
-    videos = sorted(bruts_dir.glob("*.avi"))
-    if not videos:
-        return []
-
-    trials_in_videos = {trial_from_video_name(v) for v in videos}
-
-    # on cherche des .xcp autour, puis on ne garde que ceux dont le stem = un trial présent
-    candidate_dirs = [
-        bruts_dir,
-        bruts_dir.parent,
-        bruts_dir.parent.parent if bruts_dir.parent else None,
-        bruts_dir.parent.parent.parent if bruts_dir.parent and bruts_dir.parent.parent else None,
-    ]
-    xcp_files = []
-    for d in candidate_dirs:
-        if d and d.exists():
-            xcp_files.extend(list(d.glob("*.xcp")))
-
-    xcp_by_trial = {x.stem: x for x in xcp_files if x.stem in trials_in_videos}
-
+def list_videos_from_bruts_dirs(bruts_dirs: List[Path]) -> List[Tuple[Path, str]]:
     out: List[Tuple[Path, str]] = []
-    for trial in sorted(xcp_by_trial.keys()):
-        pack = [v for v in videos if trial_from_video_name(v) == trial]
-        if not pack:
+    for br in bruts_dirs:
+        if not br.exists():
+            print(f"[WARN] Missing Bruts dir: {br}")
             continue
-        if len(pack) != 4:
-            print(f"[WARN] {bruts_dir}: trial={trial} -> {len(pack)} vidéo(s) (attendu 4)")
-        for vp in pack:
-            out.append((vp, trial))
 
-    return out
-
-
-def collect_videos_from_structure() -> List[Tuple[Path, str]]:
-    subject_dirs = find_subject_dirs(DATA_DIR, TARGET_SUBJECTS)
-    if not subject_dirs:
-        return []
-
-    all_pairs: List[Tuple[Path, str]] = []
-    for subj in subject_dirs:
-        bruts_dirs = find_bruts_dirs(subj)
-        if not bruts_dirs:
-            print(f"[WARN] Aucun dossier '{BRUTS_NAME}' trouvé pour {subj}")
+        videos = sorted(br.glob("*.avi"))
+        if not videos:
+            print(f"[WARN] No .avi in {br}")
             continue
-        for br in bruts_dirs:
-            all_pairs.extend(list_packs_from_bruts(br))
 
-    # dédoublonnage
+        by_trial = {}
+        for v in videos:
+            t = trial_from_video_name(v)
+            by_trial.setdefault(t, []).append(v)
+
+        for trial, vs in sorted(by_trial.items()):
+            if len(vs) != 4:
+                print(f"[WARN] {br}: trial={trial} -> {len(vs)} video(s) (expected 4)")
+            for v in sorted(vs):
+                out.append((v, trial))
+
     seen = set()
     dedup = []
-    for vp, trial in all_pairs:
+    for vp, trial in out:
         if vp in seen:
             continue
         seen.add(vp)
         dedup.append((vp, trial))
 
-    print(f"[INFO] Vidéos sélectionnées: {len(dedup)}")
+    print(f"[INFO] Selected videos: {len(dedup)}")
     return dedup
 
 
@@ -166,19 +125,16 @@ def extract_frames(videos: List[Tuple[Path, str]], out_img_dir: Path, manifest_p
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(manifest_path, "w", newline="", encoding="utf-8") as f:
-        wcsv = csv.writer(f)
-        wcsv.writerow(["image", "video", "frame_idx", "trial"])
+        w = csv.writer(f)
+        w.writerow(["image", "video", "frame_idx", "trial"])
 
-        total_saved = 0
+        total = 0
         for vp, trial in videos:
             cap = cv2.VideoCapture(str(vp))
             if not cap.isOpened():
                 print(f"[WARN] Cannot open {vp}")
                 continue
 
-            stride = choose_stride(trial)
-
-            # nom unique (chemin relatif à DATA_DIR)
             try:
                 rel = vp.relative_to(DATA_DIR).with_suffix("")
                 stem_unique = "__".join(rel.parts)
@@ -192,15 +148,15 @@ def extract_frames(videos: List[Tuple[Path, str]], out_img_dir: Path, manifest_p
                 if not ret or frame is None:
                     break
 
-                if idx % stride == 0:
+                if idx % STRIDE == 0:
                     if RESIZE_TO is not None:
                         frame = cv2.resize(frame, RESIZE_TO, interpolation=cv2.INTER_AREA)
 
                     img_path = out_img_dir / f"{stem_unique}_f{idx:06d}.jpg"
                     safe_imwrite(img_path, frame)
-                    wcsv.writerow([str(img_path), str(vp), idx, trial])
+                    w.writerow([str(img_path), str(vp), idx, trial])
                     saved += 1
-                    total_saved += 1
+                    total += 1
 
                     if MAX_PER_VIDEO and saved >= MAX_PER_VIDEO:
                         break
@@ -208,9 +164,9 @@ def extract_frames(videos: List[Tuple[Path, str]], out_img_dir: Path, manifest_p
                 idx += 1
 
             cap.release()
-            print(f"[OK] {vp.name} ({trial}) -> {saved} frames (stride={stride})")
+            print(f"[OK] {vp.name} ({trial}) -> {saved} frames")
 
-    print(f"[OK] Total images extraites: {total_saved}")
+    print(f"[OK] Total extracted images: {total}")
 
 
 def write_yolo_detect_label(txt_path: Path, xywhn: np.ndarray, class_id: int = 0) -> None:
@@ -224,16 +180,13 @@ def mask_to_polygon_yolo(mask: np.ndarray, img_w: int, img_h: int) -> Optional[n
     contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
-
     cnt = max(contours, key=cv2.contourArea)
     if float(cv2.contourArea(cnt)) < MIN_AREA_PX:
         return None
-
     eps = APPROX_EPS_FRAC * cv2.arcLength(cnt, True)
     approx = cv2.approxPolyDP(cnt, eps, True).reshape(-1, 2)
     if approx.shape[0] < 3:
         return None
-
     pts = approx.astype(np.float32)
     pts[:, 0] = np.clip(pts[:, 0] / float(img_w), 0.0, 1.0)
     pts[:, 1] = np.clip(pts[:, 1] / float(img_h), 0.0, 1.0)
@@ -436,19 +389,18 @@ def preview_samples(out_root: Path) -> None:
 
 def main():
     print(f"[INFO] MODE={MODE} MODEL={MODEL_PATH}")
+    if not Path(MODEL_PATH).exists():
+        print(f"[WARN] Weights not found: {MODEL_PATH} ")
+
+    reset_output(OUT_DIR)
+
+    videos = list_videos_from_bruts_dirs(BRUTS_DIRS)
+    if not videos:
+        raise SystemExit("No videos found. Check SUBJECT_NAMES / folder names and Bruts path.")
 
     img_all = OUT_DIR / "images" / "all"
     lbl_all = OUT_DIR / "labels" / "all"
     manifest = OUT_DIR / "manifest.csv"
-
-    img_all.mkdir(parents=True, exist_ok=True)
-    lbl_all.mkdir(parents=True, exist_ok=True)
-    clear_dir(img_all)
-    clear_dir(lbl_all)
-
-    videos = collect_videos_from_structure()
-    if not videos:
-        raise SystemExit("Aucune vidéo trouvée. Vérifie DATA_DIR, TARGET_SUBJECTS, et la structure.")
 
     extract_frames(videos, img_all, manifest)
     pseudo_label(img_all, lbl_all)

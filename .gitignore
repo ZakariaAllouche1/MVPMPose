@@ -309,8 +309,9 @@ pyrightconfig.json
 /results/
 /finished/
 .vscode/
-
+/yolo_dataset/
 *.pt
+/runs/
 
 # --- Autoriser les données prétraitées ---
 !data/preprocessed/

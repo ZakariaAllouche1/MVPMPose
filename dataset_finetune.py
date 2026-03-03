@@ -10,7 +10,7 @@ from ultralytics import YOLO
 
 
 DATA_DIR = Path(r"\\intram\Paris\Labo\IBHGC\PROJETS\metasport\DATA")
-OUT_DIR = Path("./yolo_dataset")
+OUT_DIR = Path("./yolo_dataset1")
 
 MODE = "detect"  # "detect" ou "seg"
 MODEL_PATH = "yolo26x.pt" if MODE == "detect" else "yolo26x-seg.pt"
@@ -33,7 +33,8 @@ MAX_PER_VIDEO = 0
 RESIZE_TO = None
 
 DEVICE = "0"
-IMGSZ = 960
+#IMGSZ = 960
+IMGSZ = 640
 CONF = 0.25
 
 PERSON_CLASS_IN_MODEL = 0

@@ -39,6 +39,8 @@ CONF = 0.25
 PERSON_CLASS_IN_MODEL = 0
 WRITE_CLASS_ID = 0
 KEEP_EMPTY_IMAGES = False
+TARGET_TRIAL_SUFFIX = "_03"
+EXPECTED_VIEWS = 4
 
 VAL_RATIO = 0.15
 SEED = 0
@@ -85,8 +87,43 @@ def trial_from_video_name(vp: Path) -> str:
     return vp.name.split(".", 1)[0]
 
 
+# def list_videos_from_bruts_dirs(bruts_dirs: List[Path]) -> List[Tuple[Path, str]]:
+#     out: List[Tuple[Path, str]] = []
+#     for br in bruts_dirs:
+#         if not br.exists():
+#             print(f"[WARN] Missing Bruts dir: {br}")
+#             continue
+
+#         videos = sorted(br.glob("*.avi"))
+#         if not videos:
+#             print(f"[WARN] No .avi in {br}")
+#             continue
+
+#         by_trial = {}
+#         for v in videos:
+#             t = trial_from_video_name(v)
+#             by_trial.setdefault(t, []).append(v)
+
+#         for trial, vs in sorted(by_trial.items()):
+#             if len(vs) != 4:
+#                 print(f"[WARN] {br}: trial={trial} -> {len(vs)} video(s) (expected 4)")
+#             for v in sorted(vs):
+#                 out.append((v, trial))
+
+#     seen = set()
+#     dedup = []
+#     for vp, trial in out:
+#         if vp in seen:
+#             continue
+#         seen.add(vp)
+#         dedup.append((vp, trial))
+
+#     print(f"[INFO] Selected videos: {len(dedup)}")
+#     return dedup
+
 def list_videos_from_bruts_dirs(bruts_dirs: List[Path]) -> List[Tuple[Path, str]]:
     out: List[Tuple[Path, str]] = []
+
     for br in bruts_dirs:
         if not br.exists():
             print(f"[WARN] Missing Bruts dir: {br}")
@@ -99,15 +136,26 @@ def list_videos_from_bruts_dirs(bruts_dirs: List[Path]) -> List[Tuple[Path, str]
 
         by_trial = {}
         for v in videos:
-            t = trial_from_video_name(v)
+            t = trial_from_video_name(v)  # ex: CMJump_03
+            if not t.endswith(TARGET_TRIAL_SUFFIX):
+                continue
             by_trial.setdefault(t, []).append(v)
 
         for trial, vs in sorted(by_trial.items()):
-            if len(vs) != 4:
-                print(f"[WARN] {br}: trial={trial} -> {len(vs)} video(s) (expected 4)")
-            for v in sorted(vs):
+            vs = sorted(vs)
+
+            if len(vs) < EXPECTED_VIEWS:
+                print(f"[WARN] {br}: trial={trial} -> {len(vs)} video(s) (expected {EXPECTED_VIEWS}) -> skipped")
+                continue
+
+            if len(vs) > EXPECTED_VIEWS:
+                print(f"[WARN] {br}: trial={trial} -> {len(vs)} video(s) (expected {EXPECTED_VIEWS}) -> keeping first {EXPECTED_VIEWS}")
+                vs = vs[:EXPECTED_VIEWS]
+
+            for v in vs:
                 out.append((v, trial))
 
+    # dédoublonnage
     seen = set()
     dedup = []
     for vp, trial in out:

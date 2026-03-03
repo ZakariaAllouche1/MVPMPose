@@ -312,6 +312,7 @@ pyrightconfig.json
 /yolo_dataset/
 *.pt
 /runs/
+/yolo_dataset1/
 
 # --- Autoriser les données prétraitées ---
 !data/preprocessed/

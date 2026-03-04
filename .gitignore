@@ -313,7 +313,8 @@ pyrightconfig.json
 *.pt
 /runs/
 /yolo_dataset1/
-
+*.mp4
+*.avi
 # --- Autoriser les données prétraitées ---
 !data/preprocessed/
 !data/preprocessed/**

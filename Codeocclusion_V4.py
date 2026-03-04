@@ -957,131 +957,261 @@ class RobustMultiViewTracker:
             track.pose_2d_confidence[cid] = detection.get('pose_confidence', 0.5)
             track.current_pose_2d_joint_confidences[cid] = detection.get('pose_2d_joint_confidences', np.full(len(detection['pose_2d']), 0.5))
 
+    # def _triangulate_group(self, group: List[Dict]) -> Optional[Tuple[np.ndarray, float, float]]:
+    #     valid_dets = [d for d in group if 'pose_2d' in d]
+    #     if len(valid_dets) < self.params['min_views_for_3d']:
+    #         return None
+        
+    #     centers_2d, weights, proj_matrices = [], [], []
+        
+    #     for d in valid_dets:
+    #         joint_confs = d.get('pose_2d_joint_confidences', np.array([]))
+    #         pose_2d = d['pose_2d']
+            
+    #         # Stratégie de calcul du centre plus robuste
+    #         center = None
+    #         weight = 0
+            
+    #         # Essayer d'abord avec le torse 
+    #         torso_indices = [5, 6, 11, 12]  # épaules, hanches
+    #         if len(joint_confs) > max(torso_indices):
+    #             valid_torso_mask = joint_confs[torso_indices] > self.params['min_joint_confidence_for_triangulation']
+    #             if np.sum(valid_torso_mask) >= 2:
+    #                 center = np.mean(pose_2d[torso_indices][valid_torso_mask], axis=0)
+    #                 weight = np.mean(joint_confs[torso_indices][valid_torso_mask])
+            
+    #         # Si pas de torse, essayer avec la tête et le cou
+    #         if center is None:
+    #             head_indices = [0, 17, 18]  # nez, tête, cou
+    #             if len(joint_confs) > max(head_indices):
+    #                 valid_head_mask = joint_confs[head_indices] > self.params['min_joint_confidence_for_triangulation']
+    #                 if np.sum(valid_head_mask) >= 2:
+    #                     center = np.mean(pose_2d[head_indices][valid_head_mask], axis=0)
+    #                     weight = np.mean(joint_confs[head_indices][valid_head_mask]) * 0.8  # Pénalité pour tête seule
+            
+    #         # En dernier recours, utiliser tous les joints valides
+    #         if center is None:
+    #             valid_mask = joint_confs > self.params['min_joint_confidence_for_triangulation']
+    #             if np.sum(valid_mask) >= 3:
+    #                 center = np.mean(pose_2d[valid_mask], axis=0)
+    #                 weight = np.mean(joint_confs[valid_mask]) * 0.7
+    #             else:
+    #                 # Utiliser le centre de la bbox
+    #                 bbox = d['bbox']
+    #                 center = np.array([(bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0])
+    #                 weight = 0.2
+    
+    #         centers_2d.append(center)
+    #         weights.append(weight)
+    #         #proj_matrices.append(self.projection_matrices[d['camera_id']])
+    #         proj_matrices.append(self.P_by_camid[d['camera_id']])
+    
+    #     if len(centers_2d) < self.params['min_views_for_3d']:
+    #         return None
+    
+
+    #     try:
+    #         # Première tentative de triangulation
+    #         center_3d = weighted_triangulate_points(proj_matrices, centers_2d, weights)
+            
+    #         # Validation de la cheiralité
+    #         cheirality_checks = [
+    #             check_cheirality(center_3d, self.cam_params_by_camid[d['camera_id']]["R"],
+    #                              self.cam_params_by_camid[d['camera_id']]["t"])
+    #             for d in valid_dets
+    #         ]
+
+            
+    #         if sum(cheirality_checks) < len(valid_dets):
+    #             # Si échec, essayer avec seulement les vues qui passent la cheiralité
+    #             valid_indices = [i for i, check in enumerate(cheirality_checks) if check]
+    #             if len(valid_indices) >= 2:
+    #                 centers_2d_valid = [centers_2d[i] for i in valid_indices]
+    #                 weights_valid = [weights[i] for i in valid_indices]
+    #                 proj_matrices_valid = [proj_matrices[i] for i in valid_indices]
+                    
+    #                 center_3d = weighted_triangulate_points(
+    #                     proj_matrices_valid, centers_2d_valid, weights_valid
+    #                 )
+    #             else:
+    #                 return None
+            
+    #         # Calcul d'erreur de reprojection
+    #         errors = []
+    #         for p, c in zip(proj_matrices, centers_2d):
+    #             proj_point = (p @ np.append(center_3d, 1))
+    #             if proj_point[2] > 0:  # Devant la caméra
+    #                 proj_2d = proj_point[:2] / proj_point[2]
+    #                 errors.append(np.linalg.norm(proj_2d - c))
+    #             else:
+    #                 errors.append(1000.0)  # Pénalité élevée si derrière la caméra
+            
+    #         mean_error = float(np.mean(errors))
+
+
+    #         #  Adapter le seuil pour les mouvements rapides
+    #         adaptive_threshold = self.params['reprojection_error_thresh']
+            
+    #         # Vérifier si c'est un mouvement rapide (sledPush)
+    #         if len(valid_dets) >= 2:
+    #             # Calculer la disparité entre les vues
+    #             bbox_sizes = []
+    #             for d in valid_dets:
+    #                 bbox = d['bbox']
+    #                 bbox_size = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+    #                 bbox_sizes.append(bbox_size)
+                
+    #             # Si grande variation de taille = mouvement rapide/proche caméra
+    #             size_variance = np.var(bbox_sizes) / np.mean(bbox_sizes)**2
+    #             if size_variance > 0.3:  # Grande variance = mouvement dynamique
+    #                 adaptive_threshold *= 2.0  # Plus tolérant
+    #                 #print(f"🏃 Mouvement rapide détecté, seuil adapté à {adaptive_threshold}")
+            
+    #         if np.mean(weights) < 0.5:  # Détections de faible qualité
+    #             adaptive_threshold *= 1.5
+            
+            
+    #         if mean_error > adaptive_threshold:
+    #             return None
+            
+    #         reproj_conf = 1.0 - (mean_error / adaptive_threshold)
+    #         pose_conf = float(np.mean([d.get('pose_confidence', 0.5) for d in valid_dets]))
+            
+    #         return center_3d, reproj_conf, pose_conf
+            
+    #     except (np.linalg.LinAlgError, ValueError) as e:
+    #         print(f" Erreur triangulation: {e}")
+    #         return None
+
+
     def _triangulate_group(self, group: List[Dict]) -> Optional[Tuple[np.ndarray, float, float]]:
-        valid_dets = [d for d in group if 'pose_2d' in d]
+        valid_dets= [d for d in group if 'pose_2d' in d]
         if len(valid_dets) < self.params['min_views_for_3d']:
             return None
         
-        centers_2d, weights, proj_matrices = [], [], []
-        
-        for d in valid_dets:
-            joint_confs = d.get('pose_2d_joint_confidences', np.array([]))
-            pose_2d = d['pose_2d']
-            
-            # Stratégie de calcul du centre plus robuste
-            center = None
-            weight = 0
-            
-            # Essayer d'abord avec le torse 
-            torso_indices = [5, 6, 11, 12]  # épaules, hanches
-            if len(joint_confs) > max(torso_indices):
-                valid_torso_mask = joint_confs[torso_indices] > self.params['min_joint_confidence_for_triangulation']
-                if np.sum(valid_torso_mask) >= 2:
-                    center = np.mean(pose_2d[torso_indices][valid_torso_mask], axis=0)
-                    weight = np.mean(joint_confs[torso_indices][valid_torso_mask])
-            
-            # Si pas de torse, essayer avec la tête et le cou
-            if center is None:
-                head_indices = [0, 17, 18]  # nez, tête, cou
-                if len(joint_confs) > max(head_indices):
-                    valid_head_mask = joint_confs[head_indices] > self.params['min_joint_confidence_for_triangulation']
-                    if np.sum(valid_head_mask) >= 2:
-                        center = np.mean(pose_2d[head_indices][valid_head_mask], axis=0)
-                        weight = np.mean(joint_confs[head_indices][valid_head_mask]) * 0.8  # Pénalité pour tête seule
-            
-            # En dernier recours, utiliser tous les joints valides
-            if center is None:
-                valid_mask = joint_confs > self.params['min_joint_confidence_for_triangulation']
-                if np.sum(valid_mask) >= 3:
-                    center = np.mean(pose_2d[valid_mask], axis=0)
-                    weight = np.mean(joint_confs[valid_mask]) * 0.7
-                else:
-                    # Utiliser le centre de la bbox
-                    bbox = d['bbox']
-                    center = np.array([(bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0])
-                    weight = 0.2
-    
-            centers_2d.append(center)
-            weights.append(weight)
-            #proj_matrices.append(self.projection_matrices[d['camera_id']])
-            proj_matrices.append(self.P_by_camid[d['camera_id']])
-    
-        if len(centers_2d) < self.params['min_views_for_3d']:
-            return None
-    
-
+        # triangulation point par point
         try:
-            # Première tentative de triangulation
-            center_3d = weighted_triangulate_points(proj_matrices, centers_2d, weights)
-            
-            # Validation de la cheiralité
-            cheirality_checks = [
-                check_cheirality(center_3d, self.cam_params_by_camid[d['camera_id']]["R"],
-                                 self.cam_params_by_camid[d['camera_id']]["t"])
-                for d in valid_dets
-            ]
+            num_joints = valid_dets[0]['pose_2d'].shape[0]
+        except (IndexError, AttributeError):
+            num_joints = 0
 
-            
-            if sum(cheirality_checks) < len(valid_dets):
-                # Si échec, essayer avec seulement les vues qui passent la cheiralité
-                valid_indices = [i for i, check in enumerate(cheirality_checks) if check]
-                if len(valid_indices) >= 2:
-                    centers_2d_valid = [centers_2d[i] for i in valid_indices]
-                    weights_valid = [weights[i] for i in valid_indices]
-                    proj_matrices_valid = [proj_matrices[i] for i in valid_indices]
-                    
-                    center_3d = weighted_triangulate_points(
-                        proj_matrices_valid, centers_2d_valid, weights_valid
-                    )
-                else:
-                    return None
-            
-            # Calcul d'erreur de reprojection
-            errors = []
-            for p, c in zip(proj_matrices, centers_2d):
-                proj_point = (p @ np.append(center_3d, 1))
-                if proj_point[2] > 0:  # Devant la caméra
-                    proj_2d = proj_point[:2] / proj_point[2]
-                    errors.append(np.linalg.norm(proj_2d - c))
-                else:
-                    errors.append(1000.0)  # Pénalité élevée si derrière la caméra
-            
-            mean_error = float(np.mean(errors))
+        triangulated_points_3d = {}
+        joint_errors = []
+        joint_confs = []
 
+        for j in range(num_joints):
+            pts_2d, prjs, wgts, cids_joints = [], [], [], []
 
-            #  Adapter le seuil pour les mouvements rapides
-            adaptive_threshold = self.params['reprojection_error_thresh']
+            for d in valid_dets:
+                cid= d['camera_id']
+                confs= d.get('pose_2d_joint_confidences', [])
+                if j < len(confs) and confs[j] >= self.params['min_joint_confidence_for_triangulation']:
+                    pts_2d.append(d['pose_2d'][j])
+                    prjs.append(self.P_by_camid[cid])
+                    wgts.append(confs[j])
+                    cids_joints.append(cid)
             
-            # Vérifier si c'est un mouvement rapide (sledPush)
-            if len(valid_dets) >= 2:
-                # Calculer la disparité entre les vues
-                bbox_sizes = []
-                for d in valid_dets:
-                    bbox = d['bbox']
-                    bbox_size = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
-                    bbox_sizes.append(bbox_size)
-                
-                # Si grande variation de taille = mouvement rapide/proche caméra
-                size_variance = np.var(bbox_sizes) / np.mean(bbox_sizes)**2
-                if size_variance > 0.3:  # Grande variance = mouvement dynamique
-                    adaptive_threshold *= 2.0  # Plus tolérant
-                    #print(f"🏃 Mouvement rapide détecté, seuil adapté à {adaptive_threshold}")
-            
-            if np.mean(weights) < 0.5:  # Détections de faible qualité
-                adaptive_threshold *= 1.5
-            
+            if len(pts_2d) >= self.params['min_views_for_3d']:
+                try:
+                    p3d = weighted_triangulate_points(prjs, pts_2d, wgts)
+                    valid_cheirality = sum(check_cheirality(p3d, self.cam_params_by_camid[cid]["R"], self.cam_params_by_camid[cid]["t"]))
+
+                    if valid_cheirality >= self.params['min_views_for_3d']:
+                        errors = []
+
+                        for p, pt in zip(prjs, pts_2d):
+                            proj_point = p @ np.append(p3d, 1)
+                            if proj_point[2] >0:
+                                proj_2d = proj_point[:2] / proj_point[2]
+                                errors.append(np.linalg.norm(proj_2d - pt))
+                            else:
+                                errors.append(1000.0)
+                        
+                        mean_err = float(np.mean(errors))
+
+                        if mean_err < self.params['reprojection_error_thresh'] * 1.5:
+                            triangulated_points_3d[j] = p3d
+                            joint_errors.append(mean_err)
+                            joint_confs.append(np.mean(wgts))
+                except (np.linalg.LinAlgError, ValueError):
+                    pass
+        
+
+        # calcul du centre 3 à partir des articulations 3d
+
+        center_3d= None
+        reproj_conf = 0.0
+        pose_conf = 0.0
+        adaptive_threshold = self.params['reprojection_error_thresh']
+
+        if triangulated_points_3d:
+            torso_indices = [5, 6, 11, 12]
+            head_indices = [0, 17, 18]
+
+            valid_torso = [triangulated_points_3d[i] for i in torso_indices if i in triangulated_points_3d]
+            valid_head = [triangulated_points_3d[i] for i in head_indices if i in triangulated_points_3d]
+
+            if len(valid_torso) >= 2:
+                center_3d = np.mean(valid_torso, axis=0)
+            elif len(valid_head) >= 2:
+                center_3d = np.mean(valid_head, axis=0)
+            else:
+                center_3d = np.mean(list(triangulated_points_3d.values()), axis=0)
+
+            mean_error= float(np.mean(joint_errors))
+            pose_error =float(np.mean(joint_confs))
+
+            bbox_sizes = [(d['bbox'][2] - d['bbox'][0]) * (d['bbox'][3] - d['bbox'][1]) for d in valid_dets]
+            size_variance = np.var(bbox_sizes) / max(1, np.mean(bbox_sizes)**2)
+
+            if size_variance > 0.3:
+                adaptive_threshold *= 2.0
             
             if mean_error > adaptive_threshold:
-                return None
+                center_3d = None
+            else:
+                reproj_conf = max(0.0, 1.0 - (mean_error / adaptive_threshold))
+
             
-            reproj_conf = 1.0 - (mean_error / adaptive_threshold)
-            pose_conf = float(np.mean([d.get('pose_confidence', 0.5) for d in valid_dets]))
+        #fallback trianguler les boites yolo
+        if center_3d is None:
+            centers_2d, weights, proj_matrices = [], [], []
+
+            for d in valid_dets:
+                bbox= d['bbox']
+                centers_2d.append(np.array([(bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0]))
+                weights.append(0.2)
+                proj_matrices.append(self.P_by_camid[d['camera_id']])
             
-            return center_3d, reproj_conf, pose_conf
-            
-        except (np.linalg.LinAlgError, ValueError) as e:
-            print(f" Erreur triangulation: {e}")
+            if len(centers_2d) >= self.params['min_views_for_3d']:
+                try:
+                    center_3d_fallback = weighted_triangulate_points(proj_matrices, centers_2d, weights)
+                    cheirality_checks = [check_cheirality(center_3d_fallback, self.cam_params_by_camid[d['camera_id']]["R"], self.cam_params_by_camid[d['camera_id']]["t"]) for d in valid_dets]
+
+                    if sum(cheirality_checks) >= self.params['min_views_for_3d']:
+                        errors = []
+
+                        for p, c in zip(proj_matrices, centers_2d):
+                            proj_point = (p @ np.append(center_3d_fallback, 1))
+                            if proj_point[2] > 0:
+                                proj_2d = proj_point[:2] / proj_point[2]
+                                errors.append(np.linalg.norm(proj_2d - c))
+                            else:
+                                errors.append(1000.0)
+                        
+                        mean_error = float(np.mean(errors))
+                        if mean_error < adaptive_threshold * 1.5:
+                            center_3d = center_3d_fallback
+                            reproj_conf = max(0.0, 1.0 - (mean_error / adaptive_threshold * 1.5))
+                            pose_conf = 0.2
+                
+                except (np.linalg.LinAlgError, ValueError):
+                    pass
+        if center_3d is None:
             return None
+        return center_3d, reproj_conf, pose_conf
+            
+                            
 
     def _calculate_spatial_consistency_score(self, group1: List[Dict], group2: List[Dict]) -> float:
         cameras1, cameras2 = {d['camera_id'] for d in group1}, {d['camera_id'] for d in group2}

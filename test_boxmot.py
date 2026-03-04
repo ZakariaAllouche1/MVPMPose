@@ -3,9 +3,7 @@ import numpy as np
 import torch
 from pathlib import Path
 from ultralytics import YOLO
-from boxmot import DeepOcSort
-
-# Patch BoxMOT: évite "float(h)" quand h est un array (1,)
+from boxmot import DeepOcSort, ByteTrack
 from boxmot.motion.kalman_filters.aabb.xysr_kf import KalmanFilterXYSR
 from copy import deepcopy
 from collections import deque
@@ -72,7 +70,7 @@ KalmanFilterXYSR.unfreeze = _patched_unfreeze
 
 
 def test_boxmot_gpu():
-    video_path = r"\\intram\Paris\Labo\IBHGC\PROJETS\metasport\DATA\METASPORT11\Session1\Files\fichiers_video\Bruts\CMJump_03.51433950.20251114140826.avi"
+    video_path = r"\\intram\Paris\Labo\IBHGC\PROJETS\metasport\DATA\METASPORT11\Session1\Files\fichiers_video\Bruts\CMJump_01.51433950.20251114140749.avi"
     model_path = "yolo26x.pt"
 
     yolo_model = YOLO(model_path)
@@ -82,6 +80,10 @@ def test_boxmot_gpu():
         device=torch.device("cuda:0"),
         half=True,
     )
+
+    # tracker = ByteTrack(
+    #     device= torch.device("cuda:0")
+    # )
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -93,7 +95,7 @@ def test_boxmot_gpu():
     fps0 = cap.get(cv2.CAP_PROP_FPS)
     fps = int(fps0) if fps0 and fps0 == fps0 and fps0 > 0 else 30
 
-    out = cv2.VideoWriter("sujet11_jump3.mp4", cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
+    out = cv2.VideoWriter("sujet11_jump1.mp4", cv2.VideoWriter_fourcc(*"mp4v"), fps, (W, H))
 
     frame_count = 0
 

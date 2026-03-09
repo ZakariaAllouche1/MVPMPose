@@ -19,7 +19,12 @@ import torchvision.transforms as transforms
 from camera_config import CAMERAS_PARAMS
 
 # CONFIG — adapte ces chemins
-SUBJECT_DIR  = 'path/to/subject_01/imgSeq/'
+BASE_DIR     = r'\\intram\paris\Labo\IBHGC\PROJETS\ecomocap\3_Data\001_ENSAMPOSE_WALK'
+SUBJECT      = 'S01'
+ACTION       = 'walk'
+IMSEQ        = 'imgSeq_walk01'
+
+SUBJECT_DIR  = os.path.join(BASE_DIR, SUBJECT, 'processed', 'action', ACTION, IMSEQ)
 WEIGHTS_PATH = 'data/pretrained/human36m/' \
                'human36m_vol_softmax_10-08-2019/' \
                'checkpoints/0040/weights.pth'
@@ -64,28 +69,6 @@ def get_bbox(cam_name, frame_idx):
     except (KeyError, IndexError):
         pass
     return None
-
-# TROUVER UNE FRAME
-def get_frame_path(cam_name, frame_idx):
-    # Essayer différents formats de nommage
-    candidates = [
-        os.path.join(SUBJECT_DIR, cam_name, f'{frame_idx:06d}.jpg'),
-        os.path.join(SUBJECT_DIR, cam_name, f'{frame_idx:05d}.jpg'),
-        os.path.join(SUBJECT_DIR, cam_name, f'{frame_idx:04d}.jpg'),
-        os.path.join(SUBJECT_DIR, cam_name, f'frame_{frame_idx:06d}.jpg'),
-        os.path.join(SUBJECT_DIR, cam_name, f'img_{frame_idx:06d}.jpg'),
-        os.path.join(SUBJECT_DIR, cam_name, f'{frame_idx:06d}.png'),
-        os.path.join(SUBJECT_DIR, cam_name, f'{frame_idx:05d}.png'),
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    raise FileNotFoundError(
-        f" Frame introuvable : cam={cam_name}, "
-        f"frame={frame_idx}\n"
-        f"Chemins essayés :\n" +
-        '\n'.join(f'  {p}' for p in candidates)
-    )
 
 # CONSTRUIRE LA MATRICE P
 def build_proj_matrix(cam_params, bbox=None, orig_size=None):
@@ -165,9 +148,7 @@ def run_frame(model, frame_idx):
 
     for cam_idx, cam_name in enumerate(CAMERA_DIRS):
         cam_params = CAMERAS_PARAMS[cam_idx]
-
-        # Charger l'image
-        img_path = get_frame_path(cam_name, frame_idx)
+        img_path =os.path.join(SUBJECT_DIR, cam_name, f'img_{frame_idx:04d}.jpg')
         img      = cv2.imread(img_path)
         if img is None:
             raise ValueError(f" Image illisible : {img_path}")
@@ -242,7 +223,7 @@ def visualize_reprojection(kps, frame_idx):
         cam_params = CAMERAS_PARAMS[cam_idx]
 
         try:
-            img_path = get_frame_path(cam_name, frame_idx)
+            img_path =os.path.join(SUBJECT_DIR, cam_name, f'img_{frame_idx:04d}.jpg')
         except FileNotFoundError:
             continue
 

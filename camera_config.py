@@ -3,7 +3,7 @@ import scipy.io as sio
 import numpy as np
 
 
-CALIB_PATH = 'path/to/calibration/camera_params.mat'
+CALIB_PATH = r'\\intram\paris\Labo\IBHGC\PROJETS\ecomocap\3_Data\001_ENSAMPOSE_WALK\S01\processed\calibration\camera_params.mat'
 
 mat = sio.loadmat(CALIB_PATH)
 

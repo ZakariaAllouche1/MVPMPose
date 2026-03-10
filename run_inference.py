@@ -203,7 +203,7 @@ def run_frame(alg_model, vol_model, frame_idx):
         orig_h, orig_w = img.shape[:2]
 
         # Récupérer la bbox
-        bbox = get_bbox(cam_name, frame_idx)
+        bbox = get_bbox(cam_name, frame_idx - 1)
         if bbox is None:
             # Pas de bbox -> image complète
             bbox = [0, 0, orig_h, orig_w]
@@ -224,13 +224,19 @@ def run_frame(alg_model, vol_model, frame_idx):
         # Matrice de projection
         P = build_proj_matrix(cam_params, bbox, (orig_h, orig_w))
 
-        cam= Camera(
-            cam_params['R'],
-            cam_params['t'],
-            cam_params['K'],
-            cam_params['dist'],
+        cam = Camera(
+            cam_params['R'].copy(),
+            cam_params['t'].copy(),
+            cam_params['K'].copy(),
+            cam_params['dist'].copy(),
             cam_params['name']
         )
+
+        top, left, bottom, right = bbox
+        cam.update_after_crop([left, top, right, bottom])
+        crop_h = bottom - top
+        crop_w = right - left
+        cam.update_after_resize((crop_h, crop_w), IMAGE_SIZE)
         cameras_batch.append([cam])
         images_list.append(tensor)
         proj_list.append(torch.from_numpy(P).float())

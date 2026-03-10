@@ -315,6 +315,8 @@ pyrightconfig.json
 /yolo_dataset1/
 *.mp4
 *.avi
+/data/
+/mvn/
 # --- Autoriser les données prétraitées ---
 !data/preprocessed/
 !data/preprocessed/**

@@ -317,6 +317,7 @@ pyrightconfig.json
 *.avi
 /data/
 /mvn/
+/output_inference/
 # --- Autoriser les données prétraitées ---
 !data/preprocessed/
 !data/preprocessed/**

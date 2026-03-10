@@ -22,7 +22,7 @@ from camera_config import CAMERAS_PARAMS
 BASE_DIR     = r'\\intram\paris\Labo\IBHGC\PROJETS\ecomocap\3_Data\001_ENSAMPOSE_WALK'
 SUBJECT      = 'S01'
 ACTION       = 'walk'
-IMSEQ        = 'imgSeq_walk01'
+IMSEQ        = 'imgSeq_walk_01'
 
 SUBJECT_DIR  = os.path.join(BASE_DIR, SUBJECT, 'processed', 'action', ACTION, IMSEQ)
 WEIGHTS_PATH = 'data/pretrained/human36m/' \
@@ -271,11 +271,12 @@ if __name__ == '__main__':
     model = load_model()
 
     # Frames à tester  indices à adapter 
-    frame_indices = [0, 10, 20, 30, 40]
+    # frame_indices = [0, 10, 20, 30, 40]
 
-    print(f"\nTraitement de {len(frame_indices)} frames...")
+    # print(f"\nTraitement de {len(frame_indices)} frames...")
 
-    for frame_idx in frame_indices:
+    # for frame_idx in frame_indices:
+    for frame_idx in range (1, 266):
         print(f"\n── Frame {frame_idx} ──")
         try:
             kps = run_frame(model, frame_idx)

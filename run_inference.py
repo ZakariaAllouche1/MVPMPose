@@ -12,7 +12,8 @@ from mpl_toolkits.mplot3d import Axes3D
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from mvn.models.triangulation import VolumetricTriangulationNet
+from mvn.models.triangulation import VolumetricTriangulationNet, AlgebraicTriangulationNet
+from mvn.utils.multiview import Camera
 from easydict import EasyDict
 import torchvision.transforms as transforms
 
@@ -101,8 +102,10 @@ def load_model():
     config = EasyDict({
         'model': {
             'name': 'vol',
+            'kind': 'mpii',
             'backbone': {
                 'name':               'pose_resnet',
+                'style':              'simple',
                 'num_layers':         152,
                 'num_deconv_layers':  3,
                 'num_deconv_filters': [256, 256, 256],
@@ -116,10 +119,13 @@ def load_model():
             'volume_size':           64,
             'volume_multiplier':     1.0,
             'volume_softmax':        True,
+            'volume_aggregation_method': 'softmax',
             'triangulation_softmax': True,
             'use_gt_pelvis':         False,
             'pelvis_type':           'pred',
             'cuboid_side':           2500.0,
+            'heatmap_softmax':        True,
+            'heatmap_multiplier':     100.0,
         }
     })
 
@@ -141,10 +147,51 @@ def load_model():
     print(" Modèle chargé")
     return model
 
+
+def load_alg_model():
+    config = EasyDict({
+        'model': {
+            'name': 'alg',
+            'use_confidences': True,
+            'heatmap_softmax': True,
+            'heatmap_multiplier': 100.0,
+            'backbone': {
+                'name':               'pose_resnet',
+                'style':              'simple',
+                'num_layers':         152,
+                'num_deconv_layers':  3,
+                'num_deconv_filters': [256, 256, 256],
+                'num_deconv_kernels': [4, 4, 4],
+                'num_joints':         N_JOINTS,
+                'image_size':         [384, 384],
+                'heatmap_size':       [96, 96],
+                'init_weights':       False,
+                'alg_confidences':       True,
+                'vol_confidences':       False,
+            },
+        }
+    })
+
+    ALG_weights = (
+        'data/pretrained/human36m/'
+        'human36m_alg_10-04-2019/'
+        'checkpoints/0060/weights.pth'
+    )
+
+    model = AlgebraicTriangulationNet(config, device=DEVICE)
+    checkpoint = torch.load(ALG_weights, map_location=DEVICE)
+    state_dict = checkpoint.get('model',checkpoint)
+    model.load_state_dict(state_dict, strict=False)
+    model.eval()
+    model.to(DEVICE)
+    print("Modèle algébrique chargé")
+    return model
+
 # INFÉRENCE SUR UNE FRAME
-def run_frame(model, frame_idx):
+def run_frame(alg_model, vol_model, frame_idx):
     images_list = []
     proj_list   = []
+    cameras_batch = []
 
     for cam_idx, cam_name in enumerate(CAMERA_DIRS):
         cam_params = CAMERAS_PARAMS[cam_idx]
@@ -177,6 +224,14 @@ def run_frame(model, frame_idx):
         # Matrice de projection
         P = build_proj_matrix(cam_params, bbox, (orig_h, orig_w))
 
+        cam= Camera(
+            cam_params['R'],
+            cam_params['t'],
+            cam_params['K'],
+            cam_params['dist'],
+            cam_params['name']
+        )
+        cameras_batch.append([cam])
         images_list.append(tensor)
         proj_list.append(torch.from_numpy(P).float())
 
@@ -185,10 +240,22 @@ def run_frame(model, frame_idx):
     proj_matrices = torch.stack(proj_list).unsqueeze(0).to(DEVICE)
 
     with torch.no_grad():
-        output = model(images, proj_matrices, None)
+        alg_output = alg_model(images, proj_matrices, None)
+        alg_kps    = alg_output[0][0].cpu().numpy() 
+        print(f" Pelvis algébrique : {alg_kps[0].round(1)} mm")
 
-    keypoints_3d = output[0] if isinstance(output, tuple) else output
-    return keypoints_3d[0].cpu().numpy()  # [17, 3]
+        pred_kps_4d =np.zeros((N_JOINTS, 4)) 
+        pred_kps_4d[:, :3] = alg_kps
+        pred_kps_4d[:, 3]  = 1.0
+
+        fake_batch = {
+            'cameras': cameras_batch,
+            'pred_keypoints_3d': [pred_kps_4d]
+        }
+        vol_output = vol_model(images, proj_matrices, fake_batch)
+
+    keypoints_3d = vol_output[0][0].cpu().numpy() 
+    return keypoints_3d
 
 # VISUALISATION 3D
 def visualize_3d(kps, frame_idx):
@@ -268,18 +335,13 @@ def visualize_reprojection(kps, frame_idx):
 if __name__ == '__main__':
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    model = load_model()
+    alg_model = load_alg_model()
+    vol_model = load_model()
 
-    # Frames à tester  indices à adapter 
-    # frame_indices = [0, 10, 20, 30, 40]
-
-    # print(f"\nTraitement de {len(frame_indices)} frames...")
-
-    # for frame_idx in frame_indices:
     for frame_idx in range (1, 266):
         print(f"\n── Frame {frame_idx} ──")
         try:
-            kps = run_frame(model, frame_idx)
+            kps = run_frame(alg_model, vol_model, frame_idx)
             print(f"  Keypoints shape : {kps.shape}")
             print(f"  Pelvis (joint 0): {kps[0].round(1)} mm")
             visualize_3d(kps, frame_idx)

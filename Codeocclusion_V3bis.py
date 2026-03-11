@@ -435,7 +435,6 @@ class FeatureExtraction:
 
 
 def parse_xcp(filepath):
-    "Vicon radial2 parametre de distorition n'est pas utilisé. j'ai testé son utilisation ça n'a rien apporté de plus bien au contraire"
     tree = ET.parse(filepath)
     root = tree.getroot()
     cameras = {}
@@ -2791,12 +2790,13 @@ class RobustMultiViewTracker:
 
 def main():
     BASE_VIDEOS_PATH = r"\\intram\Paris\Labo\IBHGC\PROJETS\metasport\DATA\METASPORT12\Session1\Files\fichiers_video\Bruts" 
-    BASE_OUTPUT_PATH = "./results/videos_V3_bis/ResultsMETASPORT12Rtmlib_V3" 
+    BASE_OUTPUT_PATH = "./results/videos_V3_bis_finetune/ResultsMETASPORT12Rtmlib_V3" 
     os.makedirs(BASE_OUTPUT_PATH, exist_ok=True)
     print(f"Dossier de sortie principal: {BASE_OUTPUT_PATH}")
     
     tracker = RobustMultiViewTracker(
-        model_path="yolo26x-seg.pt",
+        # model_path="yolo26x-seg.pt",
+        model_path="./runs/detect/train/weights/best.pt",
         feature_model_path="./pretrained_models/osnet_ain_x1_0_M.onnx",
         rtmlib_device='cuda',
         rtmlib_backend='onnxruntime',

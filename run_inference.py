@@ -17,13 +17,15 @@ from mvn.utils.multiview import Camera
 from easydict import EasyDict
 import torchvision.transforms as transforms
 
-from camera_config import CAMERAS_PARAMS
+from camera_config import load_cameras_params
 
 # CONFIG — adapte ces chemins
 BASE_DIR     = r'\\intram\paris\Labo\IBHGC\PROJETS\ecomocap\3_Data\001_ENSAMPOSE_WALK'
 SUBJECT      = 'S15'
 ACTION       = 'walk'
 IMSEQ        = 'imgSeq_walk_01'
+
+CAMERAS_PARAMS = load_cameras_params(BASE_DIR, SUBJECT)
 
 SUBJECT_DIR  = os.path.join(BASE_DIR, SUBJECT, 'processed', 'action', ACTION, IMSEQ)
 WEIGHTS_PATH = 'data/pretrained/human36m/' \

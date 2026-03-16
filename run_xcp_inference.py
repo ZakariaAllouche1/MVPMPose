@@ -1,10 +1,12 @@
 # run_xcp_inference.py
 import os
 import sys
+import csv
 import cv2
 import torch
 import numpy as np
 import matplotlib
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -12,17 +14,15 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from easydict import EasyDict
 import torchvision.transforms as transforms
-from ultralytics import YOLO
 
-from mvn.models.triangulation import VolumetricTriangulationNet, AlgebraicTriangulationNet
-from mvn.utils.multiview import Camera
+from mvn.models.triangulation import AlgebraicTriangulationNet
 from xcp_utils import load_cameras_params_from_xcp
 
 
 # =========================
 # CONFIG
 # =========================
-OUTPUT_DIR = "output_xcp_allframes_yolo"
+OUTPUT_DIR = "output_xcp_allframes"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 IMAGE_SIZE = (384, 384)
 N_JOINTS = 17
@@ -30,40 +30,40 @@ N_JOINTS = 17
 CAMERA_NAMES = ["camera1L", "camera1R", "camera2L", "camera2R"]
 
 VIDEO_BY_NAME = {
-    "camera1L": r"\\intram\paris\Labo\IBHGC\PROJETS\metasport\DATA\METASPORT12_undistort\Session1\Files\fichiers_video\Bruts\METASPORT12_undistorted\CMJump_01.51433950.20251218140238.mp4",
-    "camera1R": r"\\intram\paris\Labo\IBHGC\PROJETS\metasport\DATA\METASPORT12_undistort\Session1\Files\fichiers_video\Bruts\METASPORT12_undistorted\CMJump_01.51434015.20251218140238.mp4",
-    "camera2L": r"\\intram\paris\Labo\IBHGC\PROJETS\metasport\DATA\METASPORT12_undistort\Session1\Files\fichiers_video\Bruts\METASPORT12_undistorted\CMJump_01.51470146.20251218140238.mp4",
-    "camera2R": r"\\intram\paris\Labo\IBHGC\PROJETS\metasport\DATA\METASPORT12_undistort\Session1\Files\fichiers_video\Bruts\METASPORT12_undistorted\CMJump_01.51470940.20251218140238.mp4",
+    "camera1L": "./metasport/DATA/METASPORT12_undistort/Session1/Files/fichiers_video/Bruts/METASPORT12_undistorted/CMJump_01.51433950.20251218140238.mp4",
+    "camera1R": "./metasport/DATA/METASPORT12_undistort/Session1/Files/fichiers_video/Bruts/METASPORT12_undistorted/CMJump_01.51434015.20251218140238.mp4",
+    "camera2L": "./metasport/DATA/METASPORT12_undistort/Session1/Files/fichiers_video/Bruts/METASPORT12_undistorted/CMJump_01.51470146.20251218140238.mp4",
+    "camera2R": "./metasport/DATA/METASPORT12_undistort/Session1/Files/fichiers_video/Bruts/METASPORT12_undistorted/CMJump_01.51470940.20251218140238.mp4",
 }
 
-XCP_PATH = r"\\intram\paris\Labo\IBHGC\PROJETS\metasport\DATA\METASPORT12_undistort\Session1\Files\fichiers_video\Bruts\METASPORT12_undistorted\CMJump_01.xcp"
+XCP_PATH = "./metasport/DATA/METASPORT12_undistort/Session1/Files/fichiers_video/Bruts/METASPORT12_undistorted/CMJump_01.xcp"
 
 DEVICEID_BY_NAME = {
-    "camera1L": "CAM03",
-    "camera1R": "CAM04",
-    "camera2L": "CAM05",
-    "camera2R": "CAM06",
+    "camera1L": "51433950",
+    "camera1R": "51434015",
+    "camera2L": "51470146",
+    "camera2R": "51470940",
 }
+
+# Dans le CSV, camera_id = 0,1,2,3
+CSV_CAMERA_KEY_BY_NAME = {
+    "camera1L": "0",
+    "camera1R": "1",
+    "camera2L": "2",
+    "camera2R": "3",
+}
+
+CSV_BBOX_PATH = "./metasport/DATA/METASPORT12_undistort/Session1/Files/fichiers_video/Traites/RtmLib/METASPORT12_tracked/CMJump_01_51433950_training_data.csv"
+
+# Si le CSV contient plusieurs personnes, mets l'ID voulu ici, sinon None
+CSV_PERSON_ID = None
 
 XCP_VARIANT = "2B"
 T_SCALE = 1.0
-
-YOLO_WEIGHTS = "./runs/detect/train/weights/best.pt"
-YOLO_TRACKER = "bytetrack.yaml"
-YOLO_CONF = 0.20
-YOLO_IOU = 0.50
-YOLO_CLASS = 0
-BBOX_SCALE = 1.25
-SMOOTH_ALPHA = 0.7
-
-WEIGHTS_PATH = (
-    "data/pretrained/human36m/"
-    "human36m_vol_softmax_10-08-2019/"
-    "checkpoints/0040/weights.pth"
-)
+BBOX_SCALE = 1.25  # important : augmenter la bbox pour que le modèle alg puisse voir tous les joints
 
 ALG_WEIGHTS = (
-    "data/pretrained/human36m/"
+    "./data/pretrained/human36m/"
     "human36m_alg_10-04-2019/"
     "checkpoints/0060/weights.pth"
 )
@@ -117,19 +117,36 @@ def build_proj_matrix(cam_params, bbox=None, orig_size=None):
 
 
 # =========================
-# YOLO BBOX TRACKER
+# CSV BBOX PROVIDER
 # =========================
+def normalize_camera_key(value):
+    s = str(value).strip()
+    try:
+        f = float(s)
+        if f.is_integer():
+            return str(int(f))
+    except Exception:
+        pass
+    return s
+
+
 def clip_bbox(bbox, img_shape):
     top, left, bottom, right = bbox
     h, w = img_shape[:2]
+
     top = max(0, min(h - 1, int(top)))
     left = max(0, min(w - 1, int(left)))
     bottom = max(top + 1, min(h, int(bottom)))
     right = max(left + 1, min(w, int(right)))
+
     return [top, left, bottom, right]
 
 
-def expand_square_bbox(bbox, img_shape, scale=1.25):
+def expand_square_bbox(bbox, img_shape, scale=1.0):
+    bbox = clip_bbox(bbox, img_shape)
+    if scale == 1.0:
+        return bbox
+
     top, left, bottom, right = bbox
     h, w = img_shape[:2]
 
@@ -147,86 +164,179 @@ def expand_square_bbox(bbox, img_shape, scale=1.25):
     return clip_bbox([new_top, new_left, new_bottom, new_right], img_shape)
 
 
-def smooth_bbox(prev_bbox, curr_bbox, alpha=0.7):
-    if prev_bbox is None:
-        return curr_bbox
-    return [
-        int(round(alpha * p + (1.0 - alpha) * c))
-        for p, c in zip(prev_bbox, curr_bbox)
-    ]
+def find_col(fieldnames, candidates, required=True):
+    lower_map = {f.lower(): f for f in fieldnames}
+    for cand in candidates:
+        if cand.lower() in lower_map:
+            return lower_map[cand.lower()]
+    if required:
+        raise KeyError(
+            f"Colonne introuvable. Candidats testés: {candidates}. Colonnes disponibles: {fieldnames}"
+        )
+    return None
 
 
-class YoloTrackBBoxProvider:
-    def __init__(self, camera_names):
-        self.models = {cam: YOLO(YOLO_WEIGHTS) for cam in camera_names}
-        self.last_bbox = {cam: None for cam in camera_names}
-        self.last_track_id = {cam: None for cam in camera_names}
+class CSVBBoxProvider:
+    def __init__(
+        self,
+        csv_path,
+        deviceid_by_name,
+        bbox_scale=1.0,
+        person_id=None,
+        csv_camera_key_by_name=None,
+    ):
+        self.csv_path = csv_path
+        self.deviceid_by_name = {
+            k: normalize_camera_key(v) for k, v in deviceid_by_name.items()
+        }
+        self.csv_camera_key_by_name = {
+            k: normalize_camera_key(v) for k, v in (csv_camera_key_by_name or {}).items()
+        }
+        self.bbox_scale = bbox_scale
+        self.person_id = person_id
+        self.data = {}  # (cam_key, frame_idx_1based) -> bbox [top,left,bottom,right]
+        self.frame_offset = 0
+        self._load()
 
-    def _choose_detection(self, cam_name, boxes_xyxy, confs, track_ids, clss):
-        if len(boxes_xyxy) == 0:
-            return None
+    def _load(self):
+        if not os.path.exists(self.csv_path):
+            raise FileNotFoundError(f"CSV bbox introuvable: {self.csv_path}")
 
-        keep = np.ones(len(boxes_xyxy), dtype=bool)
-        if clss is not None:
-            keep = (clss == YOLO_CLASS)
+        with open(self.csv_path, "r", newline="", encoding="utf-8-sig") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            fieldnames = reader.fieldnames or []
 
-        idxs = np.where(keep)[0]
-        if len(idxs) == 0:
-            return None
+        if not rows:
+            raise ValueError(f"CSV bbox vide: {self.csv_path}")
 
-        prev_id = self.last_track_id[cam_name]
-        if prev_id is not None and track_ids is not None:
-            same = [i for i in idxs if track_ids[i] == prev_id]
-            if len(same) > 0:
-                return max(same, key=lambda i: confs[i])
+        print("\n=== CSV BBOX ===")
+        print("Colonnes détectées :", fieldnames)
 
-        return max(idxs, key=lambda i: confs[i])
-
-    def get_bbox(self, cam_name, img_bgr):
-        model = self.models[cam_name]
-
-        results = model.track(
-            source=img_bgr,
-            persist=True,
-            tracker=YOLO_TRACKER,
-            conf=YOLO_CONF,
-            iou=YOLO_IOU,
-            classes=[YOLO_CLASS],
-            verbose=False
+        cam_col = find_col(
+            fieldnames,
+            ["camera", "cam_name", "camera_name", "cam_id", "camera_id", "device_id"]
+        )
+        frame_col = find_col(
+            fieldnames,
+            ["frame", "frame_idx", "frame_id", "image_id"]
+        )
+        person_col = find_col(
+            fieldnames,
+            ["person_id", "person"],
+            required=False
         )
 
-        if results is None or len(results) == 0:
-            return self.last_bbox[cam_name]
+        x1_col = find_col(fieldnames, ["bbox_x1", "x1", "xmin", "left"], required=False)
+        y1_col = find_col(fieldnames, ["bbox_y1", "y1", "ymin", "top"], required=False)
+        x2_col = find_col(fieldnames, ["bbox_x2", "x2", "xmax", "right"], required=False)
+        y2_col = find_col(fieldnames, ["bbox_y2", "y2", "ymax", "bottom"], required=False)
 
-        result = results[0]
-        if result.boxes is None or len(result.boxes) == 0:
-            return self.last_bbox[cam_name]
+        x_col = find_col(fieldnames, ["x"], required=False)
+        y_col = find_col(fieldnames, ["y"], required=False)
+        w_col = find_col(fieldnames, ["w", "width"], required=False)
+        h_col = find_col(fieldnames, ["h", "height"], required=False)
 
-        boxes_xyxy = result.boxes.xyxy.cpu().numpy()
-        confs = result.boxes.conf.cpu().numpy()
-        clss = result.boxes.cls.cpu().numpy().astype(int) if result.boxes.cls is not None else None
-        track_ids = result.boxes.id.int().cpu().numpy() if result.boxes.id is not None else None
+        frame_values = []
+        for row in rows:
+            try:
+                frame_values.append(int(round(float(row[frame_col]))))
+            except Exception:
+                pass
 
-        best_idx = self._choose_detection(cam_name, boxes_xyxy, confs, track_ids, clss)
-        if best_idx is None:
-            return self.last_bbox[cam_name]
+        if not frame_values:
+            raise ValueError("Impossible de lire les indices de frame dans le CSV.")
 
-        x1, y1, x2, y2 = boxes_xyxy[best_idx]
-        bbox = [int(y1), int(x1), int(y2), int(x2)]
-        bbox = expand_square_bbox(bbox, img_bgr.shape, scale=BBOX_SCALE)
-        bbox = smooth_bbox(self.last_bbox[cam_name], bbox, alpha=SMOOTH_ALPHA)
-        bbox = clip_bbox(bbox, img_bgr.shape)
+        min_frame = min(frame_values)
+        self.frame_offset = 0 if min_frame == 1 else 1
 
-        self.last_bbox[cam_name] = bbox
-        if track_ids is not None:
-            self.last_track_id[cam_name] = int(track_ids[best_idx])
+        duplicate_count = 0
+        kept_count = 0
 
-        return bbox
+        for row in rows:
+            try:
+                if self.person_id is not None and person_col is not None:
+                    try:
+                        pid = int(float(row[person_col]))
+                        if pid != self.person_id:
+                            continue
+                    except Exception:
+                        continue
+
+                cam_key = normalize_camera_key(row[cam_col])
+                frame_raw = int(round(float(row[frame_col])))
+                frame_idx_1based = frame_raw + self.frame_offset
+
+                if None not in [x1_col, y1_col, x2_col, y2_col]:
+                    x1 = float(row[x1_col])
+                    y1 = float(row[y1_col])
+                    x2 = float(row[x2_col])
+                    y2 = float(row[y2_col])
+                elif None not in [x_col, y_col, w_col, h_col]:
+                    x1 = float(row[x_col])
+                    y1 = float(row[y_col])
+                    x2 = x1 + float(row[w_col])
+                    y2 = y1 + float(row[h_col])
+                else:
+                    raise KeyError(
+                        "Colonnes bbox non trouvées. Il faut bbox_x1,bbox_y1,bbox_x2,bbox_y2 "
+                        "ou x1,y1,x2,y2 ou left,top,right,bottom ou x,y,w,h."
+                    )
+
+                bbox = [int(round(y1)), int(round(x1)), int(round(y2)), int(round(x2))]
+                key = (cam_key, frame_idx_1based)
+
+                if key in self.data:
+                    duplicate_count += 1
+
+                self.data[key] = bbox
+                kept_count += 1
+
+            except Exception:
+                continue
+
+        print(f"CSV bbox chargé: {len(self.data)} entrées uniques")
+        print(f"Lignes gardées: {kept_count}")
+        print(f"Décalage de frame appliqué: {self.frame_offset}")
+        if duplicate_count > 0:
+            print(f"Attention: {duplicate_count} doublons cam/frame trouvés, la dernière bbox a été gardée.")
+
+        camera_keys_in_csv = sorted({k[0] for k in self.data.keys()})
+        print("Clés caméra trouvées dans le CSV :", camera_keys_in_csv)
+
+    def get_bbox(self, cam_name, frame_idx_1based, img_shape):
+        keys_to_try = [cam_name]
+
+        if cam_name in self.deviceid_by_name:
+            keys_to_try.append(self.deviceid_by_name[cam_name])
+
+        if cam_name in self.csv_camera_key_by_name:
+            keys_to_try.append(self.csv_camera_key_by_name[cam_name])
+
+        seen = set()
+        keys_to_try = [k for k in keys_to_try if not (k in seen or seen.add(k))]
+
+        for cam_key in keys_to_try:
+            bbox = self.data.get((cam_key, frame_idx_1based))
+            if bbox is not None:
+                return expand_square_bbox(bbox, img_shape, scale=self.bbox_scale)
+
+        raise RuntimeError(
+            f"Aucune bbox CSV pour cam={cam_name} "
+            f"(clés testées: {keys_to_try}) frame={frame_idx_1based}"
+        )
 
 
 # =========================
 # MODELS
 # =========================
+def safe_torch_load(path, map_location):
+    try:
+        return torch.load(path, map_location=map_location, weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
+
+
 def load_alg_model():
     config = EasyDict({
         "model": {
@@ -252,7 +362,7 @@ def load_alg_model():
     })
 
     model = AlgebraicTriangulationNet(config, device=DEVICE)
-    checkpoint = torch.load(ALG_WEIGHTS, map_location=DEVICE)
+    checkpoint = safe_torch_load(ALG_WEIGHTS, map_location=DEVICE)
     state_dict = checkpoint.get("model", checkpoint)
     model.load_state_dict(state_dict, strict=False)
     model.eval()
@@ -268,13 +378,37 @@ def open_video_caps():
     frame_counts = {}
 
     for cam_name in CAMERA_NAMES:
-        cap = cv2.VideoCapture(VIDEO_BY_NAME[cam_name])
+        path = VIDEO_BY_NAME[cam_name]
+        if not os.path.exists(path):
+            raise RuntimeError(f"Chemin introuvable pour {cam_name}: {path}")
+
+        cap = cv2.VideoCapture(path)
         if not cap.isOpened():
-            raise RuntimeError(f"Impossible d'ouvrir {VIDEO_BY_NAME[cam_name]}")
+            raise RuntimeError(f"Impossible d'ouvrir {path}")
+
         caps[cam_name] = cap
         frame_counts[cam_name] = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     return caps, frame_counts
+
+
+def print_video_and_camera_debug():
+    print("\n=== VIDEOS ===")
+    for cam_name in CAMERA_NAMES:
+        cap = cv2.VideoCapture(VIDEO_BY_NAME[cam_name])
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        cap.release()
+        print(f"{cam_name}: {w}x{h}, {n} frames")
+
+    print("\n=== CAMERAS ===")
+    for cam in CAMERAS_PARAMS:
+        print(f"\n{cam['name']}")
+        print("K =")
+        print(cam["K"])
+        print("det(R) =", np.linalg.det(cam["R"]))
+        print("t =", cam["t"].reshape(-1))
 
 
 # =========================
@@ -283,6 +417,7 @@ def open_video_caps():
 def run_frame_alg_only(alg_model, frames_bgr, frame_idx, bbox_provider):
     images_list = []
     proj_list = []
+    bboxes_used = {}
 
     for cam_idx, cam_name in enumerate(CAMERA_NAMES):
         cam_params = CAMERAS_PARAMS[cam_idx]
@@ -290,9 +425,8 @@ def run_frame_alg_only(alg_model, frames_bgr, frame_idx, bbox_provider):
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         orig_h, orig_w = img_rgb.shape[:2]
 
-        bbox = bbox_provider.get_bbox(cam_name, img_bgr)
-        if bbox is None:
-            raise RuntimeError(f"Aucune bbox YOLO pour {cam_name} frame {frame_idx}")
+        bbox = bbox_provider.get_bbox(cam_name, frame_idx, img_bgr.shape)
+        bboxes_used[cam_name] = bbox
 
         top, left, bottom, right = bbox
         img_crop = img_rgb[top:bottom, left:right]
@@ -316,7 +450,7 @@ def run_frame_alg_only(alg_model, frames_bgr, frame_idx, bbox_provider):
         alg_output = alg_model(images, proj_matrices, None)
         alg_kps = alg_output[0][0].cpu().numpy()
 
-    return alg_kps
+    return alg_kps, bboxes_used
 
 
 # =========================
@@ -333,8 +467,21 @@ def visualize_3d(kps, frame_idx):
             [kps[i, 0], kps[j, 0]],
             [kps[i, 1], kps[j, 1]],
             [kps[i, 2], kps[j, 2]],
-            "b-", linewidth=2
+            "b-",
+            linewidth=2
         )
+
+    mins = kps.min(axis=0)
+    maxs = kps.max(axis=0)
+    center = (mins + maxs) / 2.0
+    radius = 0.5 * np.max(maxs - mins)
+
+    ax.set_xlim(center[0] - radius, center[0] + radius)
+    ax.set_ylim(center[1] - radius, center[1] + radius)
+    ax.set_zlim(center[2] - radius, center[2] + radius)
+
+    ax.set_box_aspect((1, 1, 1))
+    ax.view_init(elev=15, azim=-70)
 
     ax.set_xlabel("X (mm)")
     ax.set_ylabel("Y (mm)")
@@ -365,9 +512,16 @@ def visualize_reprojection(kps, frame_idx, frames_bgr):
             h, w = img.shape[:2]
             if 0 <= x < w and 0 <= y < h:
                 cv2.circle(img, (x, y), 6, (0, 255, 0), -1)
-                cv2.putText(img, str(j), (x + 5, y - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                            (0, 0, 255), 1, cv2.LINE_AA)
+                cv2.putText(
+                    img,
+                    str(j),
+                    (x + 5, y - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 0, 255),
+                    1,
+                    cv2.LINE_AA
+                )
 
         for i, j in SKELETON:
             pi = P @ np.append(kps[i], 1.0)
@@ -395,12 +549,20 @@ def visualize_reprojection(kps, frame_idx, frames_bgr):
 if __name__ == "__main__":
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+    print_video_and_camera_debug()
+
     alg_model = load_alg_model()
-    bbox_provider = YoloTrackBBoxProvider(CAMERA_NAMES)
+    bbox_provider = CSVBBoxProvider(
+        csv_path=CSV_BBOX_PATH,
+        deviceid_by_name=DEVICEID_BY_NAME,
+        bbox_scale=BBOX_SCALE,
+        person_id=CSV_PERSON_ID,
+        csv_camera_key_by_name=CSV_CAMERA_KEY_BY_NAME,
+    )
     caps, frame_counts = open_video_caps()
 
     max_frames = min(frame_counts.values())
-    print("Nombre de frames traité :", max_frames)
+    print("\nNombre de frames traitées :", max_frames)
 
     for frame_idx in range(1, max_frames + 1):
         print(f"\n── Frame {frame_idx}/{max_frames} ──")
@@ -413,11 +575,19 @@ if __name__ == "__main__":
             frames_bgr[cam_name] = frame_bgr
 
         try:
-            kps = run_frame_alg_only(alg_model, frames_bgr, frame_idx, bbox_provider)
+            kps, _ = run_frame_alg_only(
+                alg_model=alg_model,
+                frames_bgr=frames_bgr,
+                frame_idx=frame_idx,
+                bbox_provider=bbox_provider,
+            )
+
             np.save(os.path.join(OUTPUT_DIR, f"kps3d_{frame_idx:06d}.npy"), kps)
             visualize_3d(kps, frame_idx)
             visualize_reprojection(kps, frame_idx, frames_bgr)
+
             print("shape:", kps.shape, "| pelvis:", kps[6].round(1))
+
         except Exception as e:
             print(f"Erreur frame {frame_idx}: {e}")
 

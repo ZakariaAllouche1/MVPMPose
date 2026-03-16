@@ -318,6 +318,7 @@ pyrightconfig.json
 /data/
 /mvn/
 /output_inference/
+/output_xcp/
 # --- Autoriser les données prétraitées ---
 !data/preprocessed/
 !data/preprocessed/**

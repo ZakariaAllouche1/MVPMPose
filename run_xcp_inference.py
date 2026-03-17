@@ -2,6 +2,7 @@
 import os
 import sys
 import csv
+import glob
 import cv2
 import torch
 import numpy as np
@@ -19,24 +20,20 @@ from mvn.models.triangulation import AlgebraicTriangulationNet
 from xcp_utils import load_cameras_params_from_xcp
 
 
-# =========================
 # CONFIG
-# =========================
-OUTPUT_DIR = "output_xcp_allframes"
+OUTPUT_ROOT = "output_xcp_alltests"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 IMAGE_SIZE = (384, 384)
 N_JOINTS = 17
 
+SUBJECT_NAME = "METASPORT12"
+
+
+BASE_DIR = f"./metasport/DATA/{SUBJECT_NAME}_undistort/Session1/Files/fichiers_video"
+BRUTS_DIR = os.path.join(BASE_DIR, "Bruts", f"{SUBJECT_NAME}_undistorted")
+TRACKED_DIR = os.path.join(BASE_DIR, "Traites", "RtmLib", f"{SUBJECT_NAME}_tracked")
+
 CAMERA_NAMES = ["camera1L", "camera1R", "camera2L", "camera2R"]
-
-VIDEO_BY_NAME = {
-    "camera1L": "./metasport/DATA/METASPORT12_undistort/Session1/Files/fichiers_video/Bruts/METASPORT12_undistorted/CMJump_01.51433950.20251218140238.mp4",
-    "camera1R": "./metasport/DATA/METASPORT12_undistort/Session1/Files/fichiers_video/Bruts/METASPORT12_undistorted/CMJump_01.51434015.20251218140238.mp4",
-    "camera2L": "./metasport/DATA/METASPORT12_undistort/Session1/Files/fichiers_video/Bruts/METASPORT12_undistorted/CMJump_01.51470146.20251218140238.mp4",
-    "camera2R": "./metasport/DATA/METASPORT12_undistort/Session1/Files/fichiers_video/Bruts/METASPORT12_undistorted/CMJump_01.51470940.20251218140238.mp4",
-}
-
-XCP_PATH = "./metasport/DATA/METASPORT12_undistort/Session1/Files/fichiers_video/Bruts/METASPORT12_undistorted/CMJump_01.xcp"
 
 DEVICEID_BY_NAME = {
     "camera1L": "51433950",
@@ -45,7 +42,6 @@ DEVICEID_BY_NAME = {
     "camera2R": "51470940",
 }
 
-# Dans le CSV, camera_id = 0,1,2,3
 CSV_CAMERA_KEY_BY_NAME = {
     "camera1L": "0",
     "camera1R": "1",
@@ -53,14 +49,11 @@ CSV_CAMERA_KEY_BY_NAME = {
     "camera2R": "3",
 }
 
-CSV_BBOX_PATH = "./metasport/DATA/METASPORT12_undistort/Session1/Files/fichiers_video/Traites/RtmLib/METASPORT12_tracked/CMJump_01_51433950_training_data.csv"
-
-# Si le CSV contient plusieurs personnes, mets l'ID voulu ici, sinon None
 CSV_PERSON_ID = None
 
 XCP_VARIANT = "2B"
 T_SCALE = 1.0
-BBOX_SCALE = 1.25  # important : augmenter la bbox pour que le modèle alg puisse voir tous les joints
+BBOX_SCALE = 1.25
 
 ALG_WEIGHTS = (
     "./data/pretrained/human36m/"
@@ -82,24 +75,75 @@ SKELETON = [
 ]
 
 
-# =========================
+# HELPERS
+def infer_cam_name_from_path(path):
+    basename = os.path.basename(path)
+    for cam_name, device_id in DEVICEID_BY_NAME.items():
+        if device_id in basename:
+            return cam_name
+    return None
+
+
+def discover_tests():
+    if not os.path.isdir(BRUTS_DIR):
+        raise FileNotFoundError(f"Dossier introuvable: {BRUTS_DIR}")
+
+    xcp_paths = sorted(glob.glob(os.path.join(BRUTS_DIR, "*.xcp")))
+    if not xcp_paths:
+        raise FileNotFoundError(f"Aucun fichier .xcp trouvé dans {BRUTS_DIR}")
+
+    tests = []
+
+    for xcp_path in xcp_paths:
+        test_name = os.path.splitext(os.path.basename(xcp_path))[0]
+
+        video_by_name = {}
+        missing_videos = []
+
+        for cam_name in CAMERA_NAMES:
+            device_id = DEVICEID_BY_NAME[cam_name]
+            matches = sorted(glob.glob(os.path.join(BRUTS_DIR, f"{test_name}.{device_id}*.mp4")))
+            if not matches:
+                missing_videos.append(cam_name)
+            else:
+                video_by_name[cam_name] = matches[0]
+
+        if missing_videos:
+            print(f"[SKIP] {test_name}: vidéos manquantes pour {missing_videos}")
+            continue
+
+        bbox_csv_paths = sorted(glob.glob(os.path.join(TRACKED_DIR, f"{test_name}*_training_data.csv")))
+        if not bbox_csv_paths:
+            print(f"[SKIP] {test_name}: aucun CSV bbox trouvé dans {TRACKED_DIR}")
+            continue
+
+        tests.append({
+            "test_name": test_name,
+            "xcp_path": xcp_path,
+            "video_by_name": video_by_name,
+            "bbox_csv_paths": bbox_csv_paths,
+        })
+
+    return tests
+
+
 # CAMERAS
-# =========================
-CAMERAS_PARAMS = load_cameras_params_from_xcp(
-    xcp_path=XCP_PATH,
-    deviceid_by_name=DEVICEID_BY_NAME,
-    camera_names=CAMERA_NAMES,
-    variant=XCP_VARIANT,
-    t_scale=T_SCALE
-)
+def load_cameras_for_test(xcp_path):
+    return load_cameras_params_from_xcp(
+        xcp_path=xcp_path,
+        deviceid_by_name=DEVICEID_BY_NAME,
+        camera_names=CAMERA_NAMES,
+        variant=XCP_VARIANT,
+        t_scale=T_SCALE
+    )
 
 
-def build_proj_matrix(cam_params, bbox=None, orig_size=None):
+def build_proj_matrix(cam_params, bbox=None):
     K = cam_params["K"].copy()
     R = cam_params["R"]
     t = cam_params["t"]
 
-    if bbox is not None and orig_size is not None:
+    if bbox is not None:
         top, left, bottom, right = bbox
         crop_h = bottom - top
         crop_w = right - left
@@ -116,9 +160,7 @@ def build_proj_matrix(cam_params, bbox=None, orig_size=None):
     return K @ Rt
 
 
-# =========================
 # CSV BBOX PROVIDER
-# =========================
 def normalize_camera_key(value):
     s = str(value).strip()
     try:
@@ -179,13 +221,16 @@ def find_col(fieldnames, candidates, required=True):
 class CSVBBoxProvider:
     def __init__(
         self,
-        csv_path,
+        csv_paths,
         deviceid_by_name,
         bbox_scale=1.0,
         person_id=None,
         csv_camera_key_by_name=None,
     ):
-        self.csv_path = csv_path
+        if isinstance(csv_paths, str):
+            csv_paths = [csv_paths]
+
+        self.csv_paths = csv_paths
         self.deviceid_by_name = {
             k: normalize_camera_key(v) for k, v in deviceid_by_name.items()
         }
@@ -194,28 +239,44 @@ class CSVBBoxProvider:
         }
         self.bbox_scale = bbox_scale
         self.person_id = person_id
-        self.data = {}  # (cam_key, frame_idx_1based) -> bbox [top,left,bottom,right]
-        self.frame_offset = 0
-        self._load()
+        self.data = {}
+        self._load_all()
 
-    def _load(self):
-        if not os.path.exists(self.csv_path):
-            raise FileNotFoundError(f"CSV bbox introuvable: {self.csv_path}")
+    def _infer_default_cam_key(self, csv_path):
+        cam_name = infer_cam_name_from_path(csv_path)
+        if cam_name is None:
+            return None
 
-        with open(self.csv_path, "r", newline="", encoding="utf-8-sig") as f:
+        if cam_name in self.csv_camera_key_by_name:
+            return self.csv_camera_key_by_name[cam_name]
+        return self.deviceid_by_name.get(cam_name)
+
+    def _load_all(self):
+        for csv_path in self.csv_paths:
+            self._load_one(csv_path)
+
+        print(f"\nCSV bbox total fusionné: {len(self.data)} entrées uniques")
+
+    def _load_one(self, csv_path):
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"CSV bbox introuvable: {csv_path}")
+
+        with open(csv_path, "r", newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
             rows = list(reader)
             fieldnames = reader.fieldnames or []
 
         if not rows:
-            raise ValueError(f"CSV bbox vide: {self.csv_path}")
+            raise ValueError(f"CSV bbox vide: {csv_path}")
 
         print("\n=== CSV BBOX ===")
+        print("Fichier :", csv_path)
         print("Colonnes détectées :", fieldnames)
 
         cam_col = find_col(
             fieldnames,
-            ["camera", "cam_name", "camera_name", "cam_id", "camera_id", "device_id"]
+            ["camera", "cam_name", "camera_name", "cam_id", "camera_id", "device_id"],
+            required=False
         )
         frame_col = find_col(
             fieldnames,
@@ -237,6 +298,12 @@ class CSVBBoxProvider:
         w_col = find_col(fieldnames, ["w", "width"], required=False)
         h_col = find_col(fieldnames, ["h", "height"], required=False)
 
+        default_cam_key = self._infer_default_cam_key(csv_path)
+        if cam_col is None and default_cam_key is None:
+            raise KeyError(
+                f"Aucune colonne caméra trouvée dans {csv_path} et impossible d'inférer la caméra depuis le nom du fichier."
+            )
+
         frame_values = []
         for row in rows:
             try:
@@ -245,13 +312,14 @@ class CSVBBoxProvider:
                 pass
 
         if not frame_values:
-            raise ValueError("Impossible de lire les indices de frame dans le CSV.")
+            raise ValueError(f"Impossible de lire les indices de frame dans le CSV: {csv_path}")
 
         min_frame = min(frame_values)
-        self.frame_offset = 0 if min_frame == 1 else 1
+        frame_offset = 0 if min_frame == 1 else 1
 
         duplicate_count = 0
         kept_count = 0
+        unique_before = len(self.data)
 
         for row in rows:
             try:
@@ -263,9 +331,9 @@ class CSVBBoxProvider:
                     except Exception:
                         continue
 
-                cam_key = normalize_camera_key(row[cam_col])
+                cam_key = normalize_camera_key(row[cam_col]) if cam_col is not None else default_cam_key
                 frame_raw = int(round(float(row[frame_col])))
-                frame_idx_1based = frame_raw + self.frame_offset
+                frame_idx_1based = frame_raw + frame_offset
 
                 if None not in [x1_col, y1_col, x2_col, y2_col]:
                     x1 = float(row[x1_col])
@@ -295,14 +363,14 @@ class CSVBBoxProvider:
             except Exception:
                 continue
 
-        print(f"CSV bbox chargé: {len(self.data)} entrées uniques")
+        print(f"CSV bbox chargé: +{len(self.data) - unique_before} nouvelles entrées uniques")
         print(f"Lignes gardées: {kept_count}")
-        print(f"Décalage de frame appliqué: {self.frame_offset}")
+        print(f"Décalage de frame appliqué: {frame_offset}")
         if duplicate_count > 0:
             print(f"Attention: {duplicate_count} doublons cam/frame trouvés, la dernière bbox a été gardée.")
 
         camera_keys_in_csv = sorted({k[0] for k in self.data.keys()})
-        print("Clés caméra trouvées dans le CSV :", camera_keys_in_csv)
+        print("Clés caméra actuellement disponibles :", camera_keys_in_csv)
 
     def get_bbox(self, cam_name, frame_idx_1based, img_shape):
         keys_to_try = [cam_name]
@@ -326,10 +394,7 @@ class CSVBBoxProvider:
             f"(clés testées: {keys_to_try}) frame={frame_idx_1based}"
         )
 
-
-# =========================
 # MODELS
-# =========================
 def safe_torch_load(path, map_location):
     try:
         return torch.load(path, map_location=map_location, weights_only=True)
@@ -370,15 +435,13 @@ def load_alg_model():
     return model
 
 
-# =========================
-# VIDEO IO
-# =========================
-def open_video_caps():
+# VIDEO I/O
+def open_video_caps(video_by_name):
     caps = {}
     frame_counts = {}
 
     for cam_name in CAMERA_NAMES:
-        path = VIDEO_BY_NAME[cam_name]
+        path = video_by_name[cam_name]
         if not os.path.exists(path):
             raise RuntimeError(f"Chemin introuvable pour {cam_name}: {path}")
 
@@ -392,41 +455,17 @@ def open_video_caps():
     return caps, frame_counts
 
 
-def print_video_and_camera_debug():
-    print("\n=== VIDEOS ===")
-    for cam_name in CAMERA_NAMES:
-        cap = cv2.VideoCapture(VIDEO_BY_NAME[cam_name])
-        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        cap.release()
-        print(f"{cam_name}: {w}x{h}, {n} frames")
-
-    print("\n=== CAMERAS ===")
-    for cam in CAMERAS_PARAMS:
-        print(f"\n{cam['name']}")
-        print("K =")
-        print(cam["K"])
-        print("det(R) =", np.linalg.det(cam["R"]))
-        print("t =", cam["t"].reshape(-1))
-
-
-# =========================
 # INFERENCE
-# =========================
-def run_frame_alg_only(alg_model, frames_bgr, frame_idx, bbox_provider):
+def run_frame_alg_only(alg_model, frames_bgr, frame_idx, bbox_provider, cameras_params):
     images_list = []
     proj_list = []
-    bboxes_used = {}
 
     for cam_idx, cam_name in enumerate(CAMERA_NAMES):
-        cam_params = CAMERAS_PARAMS[cam_idx]
+        cam_params = cameras_params[cam_idx]
         img_bgr = frames_bgr[cam_name]
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-        orig_h, orig_w = img_rgb.shape[:2]
 
         bbox = bbox_provider.get_bbox(cam_name, frame_idx, img_bgr.shape)
-        bboxes_used[cam_name] = bbox
 
         top, left, bottom, right = bbox
         img_crop = img_rgb[top:bottom, left:right]
@@ -438,7 +477,7 @@ def run_frame_alg_only(alg_model, frames_bgr, frame_idx, bbox_provider):
         tensor = torch.from_numpy(img_resized).permute(2, 0, 1).float() / 255.0
         tensor = NORMALIZE(tensor)
 
-        P = build_proj_matrix(cam_params, bbox, (orig_h, orig_w))
+        P = build_proj_matrix(cam_params, bbox=bbox)
 
         images_list.append(tensor)
         proj_list.append(torch.from_numpy(P).float())
@@ -450,13 +489,53 @@ def run_frame_alg_only(alg_model, frames_bgr, frame_idx, bbox_provider):
         alg_output = alg_model(images, proj_matrices, None)
         alg_kps = alg_output[0][0].cpu().numpy()
 
-    return alg_kps, bboxes_used
+    return alg_kps
 
 
-# =========================
+# CSV OUTPUT
+def keypoints3d_header():
+    header = ["frame"]
+    for j in range(N_JOINTS):
+        header.extend([f"joint{j}_x", f"joint{j}_y", f"joint{j}_z"])
+    return header
+
+
+def append_keypoints3d_csv(csv_path, frame_idx, kps):
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    file_exists = os.path.exists(csv_path)
+
+    with open(csv_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+
+        if not file_exists:
+            writer.writerow(keypoints3d_header())
+
+        row = [frame_idx]
+        for j in range(kps.shape[0]):
+            row.extend([float(kps[j, 0]), float(kps[j, 1]), float(kps[j, 2])])
+
+        writer.writerow(row)
+
+
+def append_global_keypoints3d_csv(csv_path, test_name, frame_idx, kps):
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    file_exists = os.path.exists(csv_path)
+
+    with open(csv_path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+
+        if not file_exists:
+            writer.writerow(["test_name"] + keypoints3d_header())
+
+        row = [test_name, frame_idx]
+        for j in range(kps.shape[0]):
+            row.extend([float(kps[j, 0]), float(kps[j, 1]), float(kps[j, 2])])
+
+        writer.writerow(row)
+
+
 # VISU
-# =========================
-def visualize_3d(kps, frame_idx):
+def visualize_3d(kps, frame_idx, output_dir):
     fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111, projection="3d")
 
@@ -488,16 +567,16 @@ def visualize_3d(kps, frame_idx):
     ax.set_zlabel("Z (mm)")
     ax.set_title(f"Pose 3D — frame {frame_idx}")
 
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    out = os.path.join(OUTPUT_DIR, f"pose3d_{frame_idx:06d}.png")
+    os.makedirs(output_dir, exist_ok=True)
+    out = os.path.join(output_dir, f"pose3d_{frame_idx:06d}.png")
     plt.savefig(out, dpi=100, bbox_inches="tight")
     plt.close()
 
 
-def visualize_reprojection(kps, frame_idx, frames_bgr):
+def visualize_reprojection(kps, frame_idx, frames_bgr, cameras_params, output_dir):
     for cam_idx, cam_name in enumerate(CAMERA_NAMES):
         img = frames_bgr[cam_name].copy()
-        cam_params = CAMERAS_PARAMS[cam_idx]
+        cam_params = cameras_params[cam_idx]
         P = build_proj_matrix(cam_params)
 
         for j in range(N_JOINTS):
@@ -539,33 +618,46 @@ def visualize_reprojection(kps, frame_idx, frames_bgr):
             if 0 <= xi < w and 0 <= yi < h and 0 <= xj < w and 0 <= yj < h:
                 cv2.line(img, (xi, yi), (xj, yj), (255, 0, 0), 2)
 
-        out = os.path.join(OUTPUT_DIR, f"reproj_frame{frame_idx:06d}_{cam_name}.jpg")
+        os.makedirs(output_dir, exist_ok=True)
+        out = os.path.join(output_dir, f"reproj_frame{frame_idx:06d}_{cam_name}.jpg")
         cv2.imwrite(out, img)
 
 
-# =========================
-# MAIN
-# =========================
-if __name__ == "__main__":
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+# PROCESS ONE TEST
+def process_test(test_info, alg_model, global_csv_path):
+    output_dir = os.path.join(OUTPUT_ROOT, test_info["test_name"])
+    csv_path = os.path.join(output_dir, "keypoints3d.csv")
+    vis3d_dir = os.path.join(output_dir, "vis3d")
+    reproj_dir = os.path.join(output_dir, "reprojection")
 
-    print_video_and_camera_debug()
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(vis3d_dir, exist_ok=True)
+    os.makedirs(reproj_dir, exist_ok=True)
 
-    alg_model = load_alg_model()
+    cameras_params = load_cameras_for_test(test_info["xcp_path"])
+
     bbox_provider = CSVBBoxProvider(
-        csv_path=CSV_BBOX_PATH,
+        csv_paths=test_info["bbox_csv_paths"],
         deviceid_by_name=DEVICEID_BY_NAME,
         bbox_scale=BBOX_SCALE,
         person_id=CSV_PERSON_ID,
         csv_camera_key_by_name=CSV_CAMERA_KEY_BY_NAME,
     )
-    caps, frame_counts = open_video_caps()
 
+    caps, frame_counts = open_video_caps(test_info["video_by_name"])
     max_frames = min(frame_counts.values())
-    print("\nNombre de frames traitées :", max_frames)
+
+    print("\n==============================")
+    print(f"TEST: {test_info['test_name']}")
+    print(f"XCP: {test_info['xcp_path']}")
+    print(f"CSV bbox: {test_info['bbox_csv_paths']}")
+    print(f"Frames traitées: {max_frames}")
+
+    ok_count = 0
+    err_count = 0
 
     for frame_idx in range(1, max_frames + 1):
-        print(f"\n── Frame {frame_idx}/{max_frames} ──")
+        print(f"\n── {test_info['test_name']} | Frame {frame_idx}/{max_frames} ──")
 
         frames_bgr = {}
         for cam_name in CAMERA_NAMES:
@@ -575,23 +667,56 @@ if __name__ == "__main__":
             frames_bgr[cam_name] = frame_bgr
 
         try:
-            kps, _ = run_frame_alg_only(
+            kps = run_frame_alg_only(
                 alg_model=alg_model,
                 frames_bgr=frames_bgr,
                 frame_idx=frame_idx,
                 bbox_provider=bbox_provider,
+                cameras_params=cameras_params,
             )
 
-            np.save(os.path.join(OUTPUT_DIR, f"kps3d_{frame_idx:06d}.npy"), kps)
-            visualize_3d(kps, frame_idx)
-            visualize_reprojection(kps, frame_idx, frames_bgr)
+            append_keypoints3d_csv(csv_path, frame_idx, kps)
+            append_global_keypoints3d_csv(global_csv_path, test_info["test_name"], frame_idx, kps)
+
+            visualize_3d(kps, frame_idx, vis3d_dir)
+            visualize_reprojection(kps, frame_idx, frames_bgr, cameras_params, reproj_dir)
 
             print("shape:", kps.shape, "| pelvis:", kps[6].round(1))
+            ok_count += 1
 
         except Exception as e:
             print(f"Erreur frame {frame_idx}: {e}")
+            err_count += 1
 
     for cap in caps.values():
         cap.release()
 
-    print(f"\nTerminé -> résultats dans '{OUTPUT_DIR}'")
+    print(
+        f"\nTerminé {test_info['test_name']} -> "
+        f"{ok_count} frames OK, {err_count} erreurs, résultats dans '{output_dir}'"
+    )
+
+
+# MAIN
+if __name__ == "__main__":
+    os.makedirs(OUTPUT_ROOT, exist_ok=True)
+
+    tests = discover_tests()
+    if not tests:
+        raise RuntimeError("Aucun test exploitable trouvé.")
+
+    print("\nTests détectés :")
+    for test in tests:
+        print(
+            f"- {test['test_name']} | "
+            f"{len(test['bbox_csv_paths'])} CSV bbox | "
+            f"{len(test['video_by_name'])} vidéos"
+        )
+
+    alg_model = load_alg_model()
+    global_csv_path = os.path.join(OUTPUT_ROOT, "all_tests_keypoints3d.csv")
+
+    for test_info in tests:
+        process_test(test_info, alg_model, global_csv_path)
+
+    print(f"\nTous les tests sont terminés -> résultats dans '{OUTPUT_ROOT}'")

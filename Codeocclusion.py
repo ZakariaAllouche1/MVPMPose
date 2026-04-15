@@ -408,7 +408,17 @@ def parse_xcp(filepath):
         #if focal_length < 50: focal_length *= 200
         dist_str = keyframe.get("VICON_RADIAL2", "").split()
         dist_coeffs = np.zeros(5)
-        if len(dist_str) >= 5:
+        vicon_dist = None
+        if len(dist_str) >= 6 and dist_str[0].lower().startswith("vicon"):
+            try:
+                vicon_dist = {'cx_d': float(dist_str[1]),
+                          'cy_d': float(dist_str[2]),
+                          'k1': float(dist_str[3]),
+                          'k2': float(dist_str[4]),
+                          'k3': float(dist_str[5]),}
+            except Exception:
+                pass
+        elif len(dist_str) >= 5:
             dist_coeffs[0], dist_coeffs[1], dist_coeffs[4] = float(dist_str[2]), float(dist_str[3]), float(dist_str[4])
         variants = {}
         for idx, quat in enumerate(quat_variants, 1):
@@ -419,7 +429,7 @@ def parse_xcp(filepath):
                     variants[f"{idx}B"] = {"R": Rq, "t": -Rq @ t_world.reshape(3, 1)}
             except Exception: pass
         K = np.array([[focal_length, 0, cx], [0, focal_length, cy], [0, 0, 1]], dtype=np.float64)
-        cameras[device_id] = {"variants": {k: {**rt, "K": K, "dist": dist_coeffs} for k, rt in variants.items()}}
+        cameras[device_id] = {"variants": {k: {**rt, "K": K, "dist": dist_coeffs, "vicon_dist": vicon_dist} for k, rt in variants.items()}}
     return cameras
 
 
@@ -452,6 +462,34 @@ def weighted_triangulate_points(proj_matrices: List[np.ndarray], points_2d: List
 
 def check_cheirality(p3d: np.ndarray, R: np.ndarray, t: np.ndarray) -> bool:
     return (R @ p3d.reshape(3, 1) + t)[2] > 0
+
+def build_undistort_maps(w, h, cx_d, cy_d, k1, k2, k3,
+                         max_iter=10, tol=1e-6):
+    """
+    Calcule les maps de remap pour redresser la video.
+    Methode iterative Vicon (confirmee par Vicon Support).
+    Identique a project_markers_c3d.py.
+    """
+    u_grid, v_grid = np.meshgrid(np.arange(w, dtype=np.float64),
+                                 np.arange(h, dtype=np.float64))
+    u_est = u_grid.copy()
+    v_est = v_grid.copy()
+
+    for it in range(max_iter):
+        du = u_est - cx_d
+        dv = v_est - cy_d
+        r2 = du * du + dv * dv
+        radial = k1 * r2 + k2 * r2 ** 2 + k3 * r2 ** 3
+        u_new = u_grid - du * radial
+        v_new = v_grid - dv * radial
+        err = max(np.max(np.abs(u_new - u_est)),
+                  np.max(np.abs(v_new - v_est)))
+        u_est = u_new
+        v_est = v_new
+        if err < tol:
+            break
+
+    return u_est.astype(np.float32), v_est.astype(np.float32)
 
 
 class RobustMultiViewTracker:
@@ -534,6 +572,7 @@ class RobustMultiViewTracker:
         self.P_by_camid.clear()
         self.cam_params_by_camid.clear()
         self.device_id_by_camid.clear()
+        self.undistort_maps = {} 
 
         if self.csv_file:
             self.csv_file.close()
@@ -598,6 +637,23 @@ class RobustMultiViewTracker:
             self.cam_params_by_camid[cam_id] = var
 
         print(f" Calibration chargée (variante '{best_var}') pour {len(self.P_by_camid)} caméras.")
+        self.undistort_maps = {}
+        for cam_id in self.camera_configs.keys():
+            vd = self.cam_params_by_camid[cam_id].get('vicon_dist')
+            if vd is not None:
+                src = self.camera_configs[cam_id]["source"]
+                cap_tmp = cv2.VideoCapture(src)
+                w = int(cap_tmp.get(cv2.CAP_PROP_FRAME_WIDTH))
+                h = int(cap_tmp.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                cap_tmp.release()
+                print(f"   Cam {cam_id}: calcul undistort maps {w}x{h} "
+                    f"(k1={vd['k1']:.3e})...")
+                map_x, map_y = build_undistort_maps(
+                    w, h, vd['cx_d'], vd['cy_d'], vd['k1'], vd['k2'], vd['k3'])
+                self.undistort_maps[cam_id] = (map_x, map_y)
+                print(f"   Cam {cam_id}: undistort maps OK")
+        if self.undistort_maps:
+            print(f" Undistort maps calculées pour {len(self.undistort_maps)} caméras.")
         self._initialize_yolo_models()
         return True
 
@@ -2195,18 +2251,20 @@ class RobustMultiViewTracker:
         print(f"Traitement de {total_frames} frames avec le tracker v68.0...")
         try:
             for self.frame_count in tqdm(range(total_frames), desc=f"Processing {activity_name}"):
-                # Lecture frame par frame dans le même ordre que writers
+
+                # --- ÉTAPE 4: Lire les images dans ce même ordre ---
                 frames = []
-                missing = False
-                for cap in caps:
+                for i, cap in enumerate(caps):
                     ret, f = cap.read()
                     if not ret or f is None:
-                        missing = True
-                        break
+                        print(f"\n Frame manquante de la caméra {cam_ids[i]} à l'index {self.frame_count}. Arrêt.")
+                        raise StopIteration
+                    # UNDISTORT: Redresser la vidéo (identique à project_markers_c3d.py)
+                    if cam_ids[i] in self.undistort_maps:
+                        map_x, map_y = self.undistort_maps[cam_ids[i]]
+                        f = cv2.remap(f, map_x, map_y, cv2.INTER_LINEAR,
+                                    borderMode=cv2.BORDER_CONSTANT, borderValue=0)
                     frames.append(f)
-                if missing:
-                    print(f"\n Frame manquante à l'index {self.frame_count}. Arrêt.")
-                    break
     
                 # Détection + MAJ tracks
                 dets_per_cam = {i: self._process_single_view(frames[i], cam_ids[i]) for i in range(len(cam_ids))}
@@ -2236,13 +2294,13 @@ class RobustMultiViewTracker:
 
 
 def main():
-    BASE_VIDEOS_PATH = "./metasport/DATA/METASPORT12_undistort/Session1/Files/fichiers_video/Bruts/METASPORT12_undistorted" 
-    BASE_OUTPUT_PATH = "./results/videos/ResultsMETASPORT12Rtmlib_V3" 
+    BASE_VIDEOS_PATH = r"\\intram\Paris\Labo\IBHGC\PROJETS\metasport\DATA\METASPORT11\Session1\Files\fichiers_video\Bruts" 
+    BASE_OUTPUT_PATH = "./results/videos_V2/ResultsMETASPORT11Rtmlib_V3" 
     os.makedirs(BASE_OUTPUT_PATH, exist_ok=True)
     print(f"Dossier de sortie principal: {BASE_OUTPUT_PATH}")
     
     tracker = RobustMultiViewTracker(
-        model_path="yolo26-seg.pt",
+        model_path="yolo26x-seg.pt",
         feature_model_path="./pretrained_models/osnet_ain_x1_0_M.onnx",
         rtmlib_device='cuda',
         rtmlib_backend='onnxruntime',

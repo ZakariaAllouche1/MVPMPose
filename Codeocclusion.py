@@ -632,22 +632,23 @@ class RobustMultiViewTracker:
 
         print(f" Calibration chargée (variante '{best_var}') pour {len(self.P_by_camid)} caméras.")
         self.undistort_maps = {}
-        for cam_id in self.camera_configs.keys():
-            vd = self.cam_params_by_camid[cam_id].get('vicon_dist')
-            if vd is not None:
-                src = self.camera_configs[cam_id]["source"]
-                cap_tmp = cv2.VideoCapture(src)
-                w = int(cap_tmp.get(cv2.CAP_PROP_FRAME_WIDTH))
-                h = int(cap_tmp.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                cap_tmp.release()
-                print(f"   Cam {cam_id}: calcul undistort maps {w}x{h} "
-                    f"(k1={vd['k1']:.3e})...")
-                map_x, map_y = build_undistort_maps(
-                    w, h, vd['cx_d'], vd['cy_d'], vd['k1'], vd['k2'], vd['k3'])
-                self.undistort_maps[cam_id] = (map_x, map_y)
-                print(f"   Cam {cam_id}: undistort maps OK")
-        if self.undistort_maps:
-            print(f" Undistort maps calculées pour {len(self.undistort_maps)} caméras.")
+        #Distorsion
+        # for cam_id in self.camera_configs.keys():
+        #     vd = self.cam_params_by_camid[cam_id].get('vicon_dist')
+        #     if vd is not None:
+        #         src = self.camera_configs[cam_id]["source"]
+        #         cap_tmp = cv2.VideoCapture(src)
+        #         w = int(cap_tmp.get(cv2.CAP_PROP_FRAME_WIDTH))
+        #         h = int(cap_tmp.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        #         cap_tmp.release()
+        #         print(f"   Cam {cam_id}: calcul undistort maps {w}x{h} "
+        #             f"(k1={vd['k1']:.3e})...")
+        #         map_x, map_y = build_undistort_maps(
+        #             w, h, vd['cx_d'], vd['cy_d'], vd['k1'], vd['k2'], vd['k3'])
+        #         self.undistort_maps[cam_id] = (map_x, map_y)
+        #         print(f"   Cam {cam_id}: undistort maps OK")
+        # if self.undistort_maps:
+        #     print(f" Undistort maps calculées pour {len(self.undistort_maps)} caméras.")
         self._initialize_yolo_models()
         return True
 
@@ -2386,10 +2387,10 @@ class RobustMultiViewTracker:
                         print(f"\n Frame manquante de la caméra {cam_ids[i]} à l'index {self.frame_count}. Arrêt.")
                         raise StopIteration
                     # UNDISTORT: Redresser la vidéo (identique à project_markers_c3d.py)
-                    if cam_ids[i] in self.undistort_maps:
-                        map_x, map_y = self.undistort_maps[cam_ids[i]]
-                        f = cv2.remap(f, map_x, map_y, cv2.INTER_LINEAR,
-                                    borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+                    # if cam_ids[i] in self.undistort_maps:
+                    #     map_x, map_y = self.undistort_maps[cam_ids[i]]
+                    #     f = cv2.remap(f, map_x, map_y, cv2.INTER_LINEAR,
+                    #                 borderMode=cv2.BORDER_CONSTANT, borderValue=0)
                     frames.append(f)
     
                 # Détection + MAJ tracks
@@ -2420,13 +2421,14 @@ class RobustMultiViewTracker:
 
 
 def main():
-    BASE_VIDEOS_PATH = r"\\intram\Paris\Labo\IBHGC\PROJETS\metasport\DATA\METASPORT12\Session1\Files\fichiers_video\Bruts" 
-    BASE_OUTPUT_PATH = "./results/videos_V3_bis/ResultsMETASPORT12Rtmlib_V3" 
+    BASE_VIDEOS_PATH = "./metasport/DATA/METASPORT12_undistort/Session1/Files/fichiers_video/Bruts/METASPORT12_undistorted" 
+    BASE_OUTPUT_PATH = "./results/videos_V4_undistort/ResultsMETASPORT12Rtmlib_V3" 
     os.makedirs(BASE_OUTPUT_PATH, exist_ok=True)
     print(f"Dossier de sortie principal: {BASE_OUTPUT_PATH}")
     
     tracker = RobustMultiViewTracker(
-        model_path="yolo26x-seg.pt",
+        # model_path="yolo26x-seg.pt",
+        model_path="./runs/detect/train/weights/best.pt",
         feature_model_path="./pretrained_models/osnet_ain_x1_0_M.onnx",
         rtmlib_device='cuda',
         rtmlib_backend='onnxruntime',
@@ -2483,3 +2485,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

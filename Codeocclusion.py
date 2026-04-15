@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# V6
+# V8
 import os
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 import glob
@@ -270,6 +270,7 @@ class GlobalTrack:
     last_triangulated_frame: int = -1
     single_view_streak: int = 0  # Compteur de frames consécutives avec une seule vue
     multi_view_history: deque = field(default_factory=lambda: deque(maxlen=30))  # Historique vue unique/multiple
+    multi_view_hits: int = 0  # Nombre de fois où la track a été confirmée avec >= 2 vues
 
     kf2d_mean_by_cam: Dict[int, np.ndarray] = field(default_factory=dict)   #modif: stocker les KF 2D par caméra pour chaque track
     kf2d_cov_by_cam: Dict[int, np.ndarray] = field(default_factory=dict)    #modif: stocker les KF 2D par caméra pour chaque track
@@ -732,6 +733,7 @@ class RobustMultiViewTracker:
 
         yolo_boxes = results[0].boxes
         yolo_ids = yolo_boxes.id  # peut être None
+        num_people_in_cam = len(yolo_boxes) 
 
         # Masks
         yolo_masks = getattr(results[0], "masks", None)
@@ -785,6 +787,7 @@ class RobustMultiViewTracker:
                 "confidence": float(box.conf[0]),
                 "camera_id": cam_id,
                 "tracklet_id": tid,
+                "num_people_in_cam": num_people_in_cam,
             }
 
             # Ajouter le mask si dispo
@@ -1053,16 +1056,56 @@ class RobustMultiViewTracker:
                     group1, group2 = [valid_dets[idx] for idx in clusters[c1_key]], [valid_dets[idx] for idx in clusters[c2_key]]
                     spatial_score = self._calculate_spatial_consistency_score(group1, group2)
                     if spatial_score == 0.0: continue
-                    inter_costs = appearance_cost_matrix[np.ix_(clusters[c1_key], clusters[c2_key])]
-                    if inter_costs.size == 0: continue
-                    mean_appearance_cost = float(np.mean(inter_costs))
-                    w_spatial = 0.7 if spatial_score > 0.5 else 0.3
-                    combined_cost = (1.0 - w_spatial) * mean_appearance_cost + w_spatial * (1 - spatial_score)
-                    #ancien
-                    # if combined_cost < self.params['intra_frame_thresh'] and combined_cost < min_combined_cost:
+                    # inter_costs = appearance_cost_matrix[np.ix_(clusters[c1_key], clusters[c2_key])]
+                    # if inter_costs.size == 0: continue
+                    # mean_appearance_cost = float(np.mean(inter_costs))
+                    # w_spatial = 0.7 if spatial_score > 0.5 else 0.3
+                    # combined_cost = (1.0 - w_spatial) * mean_appearance_cost + w_spatial * (1 - spatial_score)
+                    # #ancien
+                    # # if combined_cost < self.params['intra_frame_thresh'] and combined_cost < min_combined_cost:
+                    # #     min_combined_cost, best_pair = combined_cost, (c1_key, c2_key)
+
+                    # #updated
+                    # local_intra_thresh = self.params['intra_frame_thresh']
+                    # if self.frame_count < self.params['bootstrap_frames']:
+                    #     local_intra_thresh = self.params['bootstrap_intra_frame_thresh']
+
+                    # if combined_cost < local_intra_thresh and combined_cost < min_combined_cost:
                     #     min_combined_cost, best_pair = combined_cost, (c1_key, c2_key)
 
-                    #updated
+                    inter_costs = appearance_cost_matrix[np.ix_(clusters[c1_key], clusters[c2_key])]
+                    if inter_costs.size == 0:
+                        continue
+
+                    mean_appearance_cost = float(np.mean(inter_costs))
+                    min_appearance_cost = float(np.min(inter_costs))
+
+                    group1_dets = [valid_dets[idx] for idx in clusters[c1_key]]
+                    group2_dets = [valid_dets[idx] for idx in clusters[c2_key]]
+                    future_group_size = len(group1_dets) + len(group2_dets)
+
+                    crowded_merge = any(
+                        d.get("num_people_in_cam", 1) > 1
+                        for d in (group1_dets + group2_dets)
+                    )
+
+                    # Très strict pour les petits groupes 2-vues, surtout si une caméra contient plusieurs personnes
+                    if future_group_size == 2:
+                        if crowded_merge:
+                            if min_appearance_cost > 0.10 or spatial_score < 0.55:
+                                continue
+                        else:
+                            if min_appearance_cost > 0.18:
+                                continue
+
+                    # Groupe 3 vues mais contexte ambigu : on reste prudent
+                    if future_group_size == 3 and crowded_merge:
+                        if min_appearance_cost > 0.22 and spatial_score < 0.75:
+                            continue
+
+                    w_spatial = 0.7 if spatial_score > 0.5 else 0.3
+                    combined_cost = (1.0 - w_spatial) * mean_appearance_cost + w_spatial * (1 - spatial_score)
+
                     local_intra_thresh = self.params['intra_frame_thresh']
                     if self.frame_count < self.params['bootstrap_frames']:
                         local_intra_thresh = self.params['bootstrap_intra_frame_thresh']
@@ -1101,17 +1144,40 @@ class RobustMultiViewTracker:
                         pos_info1 = self._triangulate_group(group1)
                         pos_info2 = self._triangulate_group(group2)
     
+                        # if pos_info1 and pos_info2:
+                        #     dist_3d = np.linalg.norm(pos_info1[0] - pos_info2[0])
+                        #     # Si deux groupes sont extrêmement proches, c'est presque certainement la même personne
+                        #     if dist_3d < 400.0: # Seuil très strict de 40cm
+                        #         print(f" Fusion de sécurité dans _group_detections (dist={dist_3d:.0f}mm)")
+                        #         # Fusionner group2 dans group1
+                        #         final_clusters[i].extend(group2)
+                        #         # Supprimer group2
+                        #         final_clusters.pop(j)
+                        #         merged_anything = True
+                        #         # Ne pas incrémenter j, car la liste a changé
+                        #     else:
+                        #         j += 1
                         if pos_info1 and pos_info2:
                             dist_3d = np.linalg.norm(pos_info1[0] - pos_info2[0])
-                            # Si deux groupes sont extrêmement proches, c'est presque certainement la même personne
-                            if dist_3d < 400.0: # Seuil très strict de 40cm
-                                print(f" Fusion de sécurité dans _group_detections (dist={dist_3d:.0f}mm)")
-                                # Fusionner group2 dans group1
-                                final_clusters[i].extend(group2)
-                                # Supprimer group2
-                                final_clusters.pop(j)
-                                merged_anything = True
-                                # Ne pas incrémenter j, car la liste a changé
+
+                            if dist_3d < 400.0:
+                                feats1 = [d["features"] for d in group1 if d.get("features") is not None]
+                                feats2 = [d["features"] for d in group2 if d.get("features") is not None]
+
+                                if feats1 and feats2:
+                                    mean1 = np.mean(feats1, axis=0)
+                                    mean2 = np.mean(feats2, axis=0)
+                                    app_dist = float(cdist([mean1], [mean2], metric='cosine')[0, 0])
+
+                                    if app_dist < 0.12:
+                                        print(f" Fusion de sécurité dans _group_detections (dist={dist_3d:.0f}mm, app={app_dist:.2f})")
+                                        final_clusters[i].extend(group2)
+                                        final_clusters.pop(j)
+                                        merged_anything = True
+                                    else:
+                                        j += 1
+                                else:
+                                    j += 1
                             else:
                                 j += 1
                         else:
@@ -1577,6 +1643,10 @@ class RobustMultiViewTracker:
         
         # Marquer la track comme vue
         track.mark_hit(frame_idx)
+
+        num_views = len(group)
+        if num_views >= 2:
+            track.multi_view_hits += 1
         
         # Mettre à jour les données de pose pour chaque caméra
         for d in group:
@@ -2312,41 +2382,100 @@ class RobustMultiViewTracker:
                         print(f"Frame {frame_idx}: Confiance trop faible ({d.get('confidence', 0):.2f})")
                         return None        
         
-        # Vérifier les tracks récemment passées en vue unique
+        # # Vérifier les tracks récemment passées en vue unique
+        # single_view_tracks = [
+        #     t for t in self.global_tracks.values()
+        #     if t.single_view_streak > 0 and t.state != TrackState.Lost
+        # ]
+        
+        # for track in single_view_tracks:
+        #     if len(group) == 1:  # Nouvelle détection aussi en vue unique
+        #         if track.feature_gallery and group_features_list:
+        #             gallery = np.array(list(track.feature_gallery))
+        #             app_dist = float(np.min(cdist([group_features], gallery, metric='cosine')))
+                    
+        #             if app_dist < 0.35:
+        #                 # Vérifier la cohérence spatiale 2D dans la même caméra
+        #                 for d in group:
+        #                     cam_id = d['camera_id']
+        #                     # Chercher la dernière position connue dans cette caméra
+        #                     if cam_id in track.current_bbox or (cam_id in track.kf2d_mean_by_cam):
+        #                         if cam_id in track.current_bbox:
+        #                             prev_bbox = track.current_bbox[cam_id]
+        #                         else:
+        #                             pred_bbox = kalman_to_bbox_format(track.kf2d_mean_by_cam[cam_id])
+        #                             prev_bbox = pred_bbox
+                                
+        #                         curr_bbox = d['bbox']
+        #                         center_prev = [(prev_bbox[0]+prev_bbox[2])/2, (prev_bbox[1]+prev_bbox[3])/2]
+        #                         center_curr = [(curr_bbox[0]+curr_bbox[2])/2, (curr_bbox[1]+curr_bbox[3])/2]
+        #                         dist_2d = np.linalg.norm(np.array(center_curr) - np.array(center_prev))
+                                
+        #                         # Tolérance basée sur le temps depuis dernière vue
+        #                         max_dist = 200 + track.time_since_update * 30
+        #                         if dist_2d < max_dist:
+        #                             print(f" Réassociation Track {track.global_id} en vue unique (app:{app_dist:.2f}, dist2D:{dist_2d:.0f})")
+        #                             self._update_matched_track(track, group, frame_idx)
+        #                             return track
+
         single_view_tracks = [
             t for t in self.global_tracks.values()
-            if t.single_view_streak > 0 and t.state != TrackState.Lost
+            if (
+                t.single_view_streak > 0
+                and t.state != TrackState.Lost
+                and t.multi_view_hits >= 2
+                and t.time_since_update <= 3
+            )
         ]
-        
+
         for track in single_view_tracks:
-            if len(group) == 1:  # Nouvelle détection aussi en vue unique
-                if track.feature_gallery and group_features_list:
-                    gallery = np.array(list(track.feature_gallery))
-                    app_dist = float(np.min(cdist([group_features], gallery, metric='cosine')))
-                    
-                    if app_dist < 0.35:
-                        # Vérifier la cohérence spatiale 2D dans la même caméra
-                        for d in group:
-                            cam_id = d['camera_id']
-                            # Chercher la dernière position connue dans cette caméra
-                            if cam_id in track.current_bbox or (cam_id in track.kf2d_mean_by_cam):
-                                if cam_id in track.current_bbox:
-                                    prev_bbox = track.current_bbox[cam_id]
-                                else:
-                                    pred_bbox = kalman_to_bbox_format(track.kf2d_mean_by_cam[cam_id])
-                                    prev_bbox = pred_bbox
-                                
-                                curr_bbox = d['bbox']
-                                center_prev = [(prev_bbox[0]+prev_bbox[2])/2, (prev_bbox[1]+prev_bbox[3])/2]
-                                center_curr = [(curr_bbox[0]+curr_bbox[2])/2, (curr_bbox[1]+curr_bbox[3])/2]
-                                dist_2d = np.linalg.norm(np.array(center_curr) - np.array(center_prev))
-                                
-                                # Tolérance basée sur le temps depuis dernière vue
-                                max_dist = 200 + track.time_since_update * 30
-                                if dist_2d < max_dist:
-                                    print(f" Réassociation Track {track.global_id} en vue unique (app:{app_dist:.2f}, dist2D:{dist_2d:.0f})")
-                                    self._update_matched_track(track, group, frame_idx)
-                                    return track
+            if len(group) != 1:
+                continue
+
+            d = group[0]
+            cam_id = d['camera_id']
+            tid = d.get('tracklet_id', None)
+
+            same_tracklet = (
+                tid is not None and
+                track.last_tracklet_id.get(cam_id) == tid
+            )
+
+            if not track.feature_gallery or not group_features_list:
+                continue
+
+            gallery = np.array(list(track.feature_gallery))
+            app_dist = float(np.min(cdist([group_features], gallery, metric='cosine')))
+
+            if cam_id in track.current_bbox:
+                prev_bbox = track.current_bbox[cam_id]
+            elif cam_id in track.kf2d_mean_by_cam:
+                prev_bbox = kalman_to_bbox_format(track.kf2d_mean_by_cam[cam_id])
+            else:
+                continue
+
+            curr_bbox = d['bbox']
+            center_prev = np.array([
+                (prev_bbox[0] + prev_bbox[2]) / 2,
+                (prev_bbox[1] + prev_bbox[3]) / 2
+            ])
+            center_curr = np.array([
+                (curr_bbox[0] + curr_bbox[2]) / 2,
+                (curr_bbox[1] + curr_bbox[3]) / 2
+            ])
+            dist_2d = np.linalg.norm(center_curr - center_prev)
+
+            # En vue unique, on exige soit le même tracklet local,
+            # soit une apparence très proche + un déplacement faible
+            strict_reid = (app_dist < 0.10 and dist_2d < 60)
+
+            if same_tracklet or strict_reid:
+                print(
+                    f" Réassociation Track {track.global_id} en vue unique "
+                    f"(app:{app_dist:.2f}, dist2D:{dist_2d:.0f}, same_tid={same_tracklet})"
+                )
+                self._update_matched_track(track, group, frame_idx)
+                return track
         
         # Vérifier les tracks récemment perdues ou occludées
         recent_lost_tracks = [
@@ -2617,11 +2746,57 @@ class RobustMultiViewTracker:
                 #     full_proj_pts[valid_mask] = proj2d
                 #     self._draw_skeleton_custom(vis, full_proj_pts, self.joint_edges, (255, 0, 0), 3)
 
+                # if (
+                #     cam_id in track.current_pose_2d
+                #     and track.current_pose_3d is not None
+                #     and np.any(~np.isnan(track.current_pose_3d[:, 0]))
+                #     and track.pose_3d_confidence > 0.35
+                # ):
+                #     valid_mask = ~np.isnan(track.current_pose_3d[:, 0])
+
+                #     proj2d = self.project_3d_to_2d(
+                #         track.current_pose_3d[valid_mask],
+                #         self.P_by_camid[cam_id]
+                #     )
+
+                #     full_proj_pts = np.full_like(track.current_pose_3d[:, :2], np.nan)
+                #     full_proj_pts[valid_mask] = proj2d
+
+                #     # Vérification de cohérence avec la pose 2D de cette caméra
+                #     pose2d_cam = track.current_pose_2d[cam_id]
+                #     confs_cam = track.current_pose_2d_joint_confidences.get(
+                #         cam_id,
+                #         np.ones(len(pose2d_cam), dtype=float)
+                #     )
+
+                #     compare_mask = (
+                #         valid_mask
+                #         & (confs_cam > 0.3)
+                #         & ~np.isnan(pose2d_cam[:, 0])
+                #         & ~np.isnan(pose2d_cam[:, 1])
+                #     )
+
+                #     if np.sum(compare_mask) >= 4:
+                #         reproj_err = np.mean(
+                #             np.linalg.norm(
+                #                 full_proj_pts[compare_mask] - pose2d_cam[compare_mask],
+                #                 axis=1
+                #             )
+                #         )
+
+                #         # Seuil à ajuster si besoin
+                #         if reproj_err < 45.0:
+                #             self._draw_skeleton_custom(vis, full_proj_pts, self.joint_edges, (255, 0, 0), 3)
+                #     else:
+                #         # Pas assez de points fiables -> on ne dessine pas le bleu
+                #         pass
                 if (
                     cam_id in track.current_pose_2d
                     and track.current_pose_3d is not None
                     and np.any(~np.isnan(track.current_pose_3d[:, 0]))
                     and track.pose_3d_confidence > 0.35
+                    and track.multi_view_hits >= 2
+                    and track.time_since_update == 0
                 ):
                     valid_mask = ~np.isnan(track.current_pose_3d[:, 0])
 
@@ -2655,12 +2830,9 @@ class RobustMultiViewTracker:
                             )
                         )
 
-                        # Seuil à ajuster si besoin
-                        if reproj_err < 45.0:
+                        draw_thresh = 30.0 if track.multi_view_hits < 3 else 45.0
+                        if reproj_err < draw_thresh:
                             self._draw_skeleton_custom(vis, full_proj_pts, self.joint_edges, (255, 0, 0), 3)
-                    else:
-                        # Pas assez de points fiables -> on ne dessine pas le bleu
-                        pass
             writer.write(cv2.resize(vis, self.save_resolution))
 
 
@@ -2844,7 +3016,7 @@ class RobustMultiViewTracker:
 
 def main():
     BASE_VIDEOS_PATH = "./metasport/DATA/METASPORT12_undistort/Session1/Files/fichiers_video/Bruts/METASPORT12_undistorted" 
-    BASE_OUTPUT_PATH = "./results/videos_V4_undistort/ResultsMETASPORT12Rtmlib_V3" 
+    BASE_OUTPUT_PATH = "./results/videos_V8_undistort/ResultsMETASPORT12Rtmlib_V3" 
     os.makedirs(BASE_OUTPUT_PATH, exist_ok=True)
     print(f"Dossier de sortie principal: {BASE_OUTPUT_PATH}")
     

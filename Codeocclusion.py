@@ -522,6 +522,7 @@ class RobustMultiViewTracker:
         self.projection_matrices: List[np.ndarray] = []
         self.cam_params: List[Dict] = []
         self.global_tracks: Dict[int, GlobalTrack] = {}
+        self.tracklet_registry: Dict[Tuple[int, int], Dict[str, int]] = {}  #modif
         self.next_global_id = 1
         self.frame_count = 0
         self.csv_file, self.csv_writer = None, None
@@ -559,6 +560,7 @@ class RobustMultiViewTracker:
     def reset_for_new_activity(self):
         self.global_tracks.clear()
         self.next_global_id = 1
+        self.tracklet_registry.clear()   #modif
         self.frame_count = 0
         self.camera_configs.clear()
         self.projection_matrices.clear()
@@ -1108,7 +1110,121 @@ class RobustMultiViewTracker:
                 cost_matrix[i, valid_group_indices] = group_costs
                 
         return cost_matrix
-        
+    
+    #modifs
+    def _get_recent_tracklet_owner(
+        self,
+        camera_id: int,
+        tracklet_id: int,
+        current_frame: int,
+        max_age: int = 10,
+        exclude_track_id: Optional[int] = None
+    ) -> Optional[int]:
+        key = (camera_id, tracklet_id)
+        info = self.tracklet_registry.get(key)
+
+        if info is None:
+            return None
+
+        if current_frame - info["frame_idx"] > max_age:
+            return None
+
+        owner = info["global_id"]
+
+        # si la track n'existe plus, on ignore
+        if owner not in self.global_tracks:
+            return None
+
+        if exclude_track_id is not None and owner == exclude_track_id:
+            return None
+
+        return owner
+
+
+    def _is_same_tracklet_reliable(self, track: GlobalTrack, detection: Dict) -> bool:
+        cid = detection["camera_id"]
+        tid = detection.get("tracklet_id")
+
+        if tid is None:
+            return False
+
+        # le tracklet local doit être le même que celui vu récemment pour cette track
+        if track.last_tracklet_id.get(cid) != tid:
+            return False
+
+        # Vérification spatiale 2D dans la même caméra
+        if cid in track.kf2d_mean_by_cam:
+            pred_bbox = kalman_to_bbox_format(track.kf2d_mean_by_cam[cid])
+            curr_bbox = detection["bbox"]
+
+            pred_center = np.array([
+                0.5 * (pred_bbox[0] + pred_bbox[2]),
+                0.5 * (pred_bbox[1] + pred_bbox[3])
+            ], dtype=float)
+
+            curr_center = np.array([
+                0.5 * (curr_bbox[0] + curr_bbox[2]),
+                0.5 * (curr_bbox[1] + curr_bbox[3])
+            ], dtype=float)
+
+            dist2d = np.linalg.norm(curr_center - pred_center)
+            max_dist = 120.0 + 25.0 * track.time_since_update
+
+            if dist2d > max_dist:
+                return False
+
+        # Vérification apparence
+        if track.feature_gallery and detection.get("features") is not None:
+            gallery = np.array(list(track.feature_gallery))
+            app_dist = float(np.min(cdist([detection["features"]], gallery, metric="cosine")))
+
+            if app_dist > 0.35:
+                return False
+
+        return True
+
+
+    def _compute_pose_cost_single(self, track: GlobalTrack, detection: Dict) -> float:
+        cid = detection["camera_id"]
+
+        if cid not in track.current_pose_2d:
+            return 0.5
+        if detection.get("pose_2d") is None:
+            return 0.5
+
+        pose_prev = track.current_pose_2d[cid]
+        pose_curr = detection["pose_2d"]
+
+        conf_prev = track.current_pose_2d_joint_confidences.get(cid, None)
+        conf_curr = detection.get("pose_2d_joint_confidences", None)
+
+        if conf_prev is None or conf_curr is None:
+            return 0.5
+
+        valid = (conf_prev > 0.4) & (conf_curr > 0.4)
+        if np.sum(valid) < 4:
+            return 0.5
+
+        p1 = pose_prev[valid].astype(float)
+        p2 = pose_curr[valid].astype(float)
+
+        # normalisation translation
+        c1 = np.mean(p1, axis=0)
+        c2 = np.mean(p2, axis=0)
+        p1 = p1 - c1
+        p2 = p2 - c2
+
+        # normalisation échelle
+        s1 = np.mean(np.linalg.norm(p1, axis=1)) + 1e-6
+        s2 = np.mean(np.linalg.norm(p2, axis=1)) + 1e-6
+        p1 /= s1
+        p2 /= s2
+
+        err = np.mean(np.linalg.norm(p1 - p2, axis=1))
+        return float(min(1.0, err / 0.5))
+
+    #fin modifs
+
     def _compute_cost_matrix(self, tracks: List[GlobalTrack], groups: List[List[Dict]]) -> np.ndarray:
         num_tracks, num_groups = len(tracks), len(groups)
         if num_tracks == 0 or num_groups == 0:
@@ -1224,14 +1340,90 @@ class RobustMultiViewTracker:
                     # Track a 3D mais groupe en vue unique : utiliser la position prédite
                     spat_cost = 0.5  # Coût modéré fixe
                 
-                total_cost = (w_app * app_cost[i, j] + w_mot * motion_cost + w_spat * spat_cost)
+                #ancienne version (V4)
+                # total_cost = (w_app * app_cost[i, j] + w_mot * motion_cost + w_spat * spat_cost)
                 
+                # # Pénalité de proximité avec d'autres tracks (seulement si 3D disponible)
+                # if track.has_3d and group_3d_info:
+                #     proximity_penalty = 0.0
+                #     current_group_pos = group_3d_info[0]
+                #     for other_track_id, other_track_pos in track_positions_3d.items():
+                #         if track.global_id == other_track_id: continue
+                #         if np.linalg.norm(track.mean_3d[:3] - other_track_pos) < 1200.0:
+                #             if np.linalg.norm(current_group_pos - other_track_pos) < np.linalg.norm(current_group_pos - track.mean_3d[:3]):
+                #                 proximity_penalty = max(proximity_penalty, 0.2)
+                #     total_cost += proximity_penalty
+
+
+                # # --- Anti-switch penalty (identity inertia) ---
+                # switch_penalty = 0.0
+                
+                # if group_3d_info and track.has_3d:
+                #     current_group_pos = group_3d_info[0]
+                #     reproj_conf = float(group_3d_info[1])  # 0..1
+                
+                #     # Appliquer seulement si la triangulation est raisonnablement fiable
+                #     if reproj_conf >= 0.45:
+                #         d_self = np.linalg.norm(current_group_pos - track.mean_3d[:3])
+                
+                #         best_other_margin = 0.0
+                #         for other in tracks:
+                #             if other.global_id == track.global_id or not other.has_3d:
+                #                 continue
+                #             d_other = np.linalg.norm(current_group_pos - other.mean_3d[:3])
+                
+                #             # Danger de switch si le groupe est plus proche d'un autre track
+                #             if d_other + 1e-6 < d_self:
+                #                 # marge normalisée (0..1)
+                #                 margin = min(1.0, max(0.0, (d_self - d_other) / max(1.0, d_self)))
+                #                 best_other_margin = max(best_other_margin, margin)
+                
+                #         # Poids dépendant de l'ambiguïté apparence :
+                #         # app_cost bas = apparence forte → pénaliser moins
+                #         # app_cost haut = apparence faible → pénaliser plus
+                #         ambig = float(app_cost[i, j])          # 0..1 (cosine cost)
+                #         w = 0.15 + 0.20 * min(1.0, ambig)      # ~0.15..0.35
+                #         switch_penalty = w * best_other_margin
+                
+                # total_cost += switch_penalty
+
+                # has_tracklet_match = False
+
+                # for d in group:
+                #     cid = d["camera_id"]
+                #     tid= d.get("tracklet_id")
+
+                #     if tid is not None and track.last_tracklet_id.get(cid) ==tid:
+                #         has_tracklet_match = True
+                #         break
+                # if has_tracklet_match:
+                #     total_cost *= 0.3
+
+                # if total_cost < adaptive_thresh:
+                #     cost_matrix[i, j] = total_cost
+
+                #modif
+                # 1) coût de base existant
+                base_cost = (w_app * app_cost[i, j] + w_mot * motion_cost + w_spat * spat_cost)
+
+                # 2) coût de pose (nouveau)
+                pose_costs = []
+                for d in group:
+                    if d.get("pose_2d") is not None:
+                        pose_costs.append(self._compute_pose_cost_single(track, d))
+
+                pose_cost = float(np.mean(pose_costs)) if pose_costs else 0.5
+
+                # 3) fusion : on garde ta logique dynamique + on ajoute un peu la pose
+                total_cost = 0.85 * base_cost + 0.15 * pose_cost
+
                 # Pénalité de proximité avec d'autres tracks (seulement si 3D disponible)
                 if track.has_3d and group_3d_info:
                     proximity_penalty = 0.0
                     current_group_pos = group_3d_info[0]
                     for other_track_id, other_track_pos in track_positions_3d.items():
-                        if track.global_id == other_track_id: continue
+                        if track.global_id == other_track_id:
+                            continue
                         if np.linalg.norm(track.mean_3d[:3] - other_track_pos) < 1200.0:
                             if np.linalg.norm(current_group_pos - other_track_pos) < np.linalg.norm(current_group_pos - track.mean_3d[:3]):
                                 proximity_penalty = max(proximity_penalty, 0.2)
@@ -1240,47 +1432,60 @@ class RobustMultiViewTracker:
 
                 # --- Anti-switch penalty (identity inertia) ---
                 switch_penalty = 0.0
-                
+
                 if group_3d_info and track.has_3d:
                     current_group_pos = group_3d_info[0]
-                    reproj_conf = float(group_3d_info[1])  # 0..1
-                
-                    # Appliquer seulement si la triangulation est raisonnablement fiable
+                    reproj_conf = float(group_3d_info[1])
+
                     if reproj_conf >= 0.45:
                         d_self = np.linalg.norm(current_group_pos - track.mean_3d[:3])
-                
+
                         best_other_margin = 0.0
                         for other in tracks:
                             if other.global_id == track.global_id or not other.has_3d:
                                 continue
                             d_other = np.linalg.norm(current_group_pos - other.mean_3d[:3])
-                
-                            # Danger de switch si le groupe est plus proche d'un autre track
+
                             if d_other + 1e-6 < d_self:
-                                # marge normalisée (0..1)
                                 margin = min(1.0, max(0.0, (d_self - d_other) / max(1.0, d_self)))
                                 best_other_margin = max(best_other_margin, margin)
-                
-                        # Poids dépendant de l'ambiguïté apparence :
-                        # app_cost bas = apparence forte → pénaliser moins
-                        # app_cost haut = apparence faible → pénaliser plus
-                        ambig = float(app_cost[i, j])          # 0..1 (cosine cost)
-                        w = 0.15 + 0.20 * min(1.0, ambig)      # ~0.15..0.35
+
+                        ambig = float(app_cost[i, j])
+                        w = 0.15 + 0.20 * min(1.0, ambig)
                         switch_penalty = w * best_other_margin
-                
+
                 total_cost += switch_penalty
 
-                has_tracklet_match = False
+                # 4) nouveau traitement sécurisé du tracklet local
+                reliable_tracklet_matches = 0
+                tracklet_conflict = False
 
                 for d in group:
                     cid = d["camera_id"]
-                    tid= d.get("tracklet_id")
+                    tid = d.get("tracklet_id")
 
-                    if tid is not None and track.last_tracklet_id.get(cid) ==tid:
-                        has_tracklet_match = True
+                    if tid is None:
+                        continue
+
+                    # si ce tracklet local appartient récemment à une autre track, on rejette
+                    owner = self._get_recent_tracklet_owner(
+                        cid, tid, self.frame_count, max_age=10,
+                        exclude_track_id=track.global_id
+                    )
+
+                    if owner is not None:
+                        tracklet_conflict = True
                         break
-                if has_tracklet_match:
-                    total_cost *= 0.3
+
+                    # bonus léger seulement si cohérent
+                    if self._is_same_tracklet_reliable(track, d):
+                        reliable_tracklet_matches += 1
+
+                if tracklet_conflict:
+                    continue
+
+                if reliable_tracklet_matches > 0:
+                    total_cost *= 0.85
 
                 if total_cost < adaptive_thresh:
                     cost_matrix[i, j] = total_cost
@@ -1311,7 +1516,26 @@ class RobustMultiViewTracker:
         for d in group:
             self._update_pose_data_in_track(track, d)
         
-        # Mise à jour du filtre de Kalman 2D
+        #version précédente (V4)
+        # # Mise à jour du filtre de Kalman 2D
+        # for d in group:
+        #     cid = d["camera_id"]
+        #     meas = bbox_to_kalman_format(d["bbox"])
+
+        #     if cid not in track.kf2d_mean_by_cam:
+        #         m, c = self.kf.initiate(meas)
+        #     else:
+        #         m = track.kf2d_mean_by_cam[cid]
+        #         c = track.kf2d_cov_by_cam[cid]
+        #         m, c = self.kf.update(m, c, meas)
+
+        #     track.kf2d_mean_by_cam[cid] = m
+        #     track.kf2d_cov_by_cam[cid] = c
+
+        #     if d.get("tracklet_id") is not None:
+        #         track.last_tracklet_id[cid] = d["tracklet_id"]
+
+        #modif
         for d in group:
             cid = d["camera_id"]
             meas = bbox_to_kalman_format(d["bbox"])
@@ -1326,8 +1550,22 @@ class RobustMultiViewTracker:
             track.kf2d_mean_by_cam[cid] = m
             track.kf2d_cov_by_cam[cid] = c
 
-            if d.get("tracklet_id") is not None:
-                track.last_tracklet_id[cid] = d["tracklet_id"]
+            tid = d.get("tracklet_id")
+            if tid is not None:
+                track.last_tracklet_id[cid] = tid
+                self.tracklet_registry[(cid, tid)] = {
+                    "global_id": track.global_id,
+                    "frame_idx": frame_idx
+                }
+
+        # purge légère du registre
+        to_delete = []
+        for key, info in self.tracklet_registry.items():
+            if frame_idx - info["frame_idx"] > 30:
+                to_delete.append(key)
+
+        for key in to_delete:
+            del self.tracklet_registry[key]
         
         # Calculer le ratio de visibilité
         track.last_visible_ratio = self._estimate_group_visibility_ratio(group)
@@ -1910,11 +2148,28 @@ class RobustMultiViewTracker:
                     keep, remove = t2, t1
                     keep_id, remove_id = tid2, tid1
                 
-                # Transférer les informations
+                #V4
+                # # Transférer les informations
+                # keep.current_bbox.update(remove.current_bbox)
+                # keep.current_pose_2d.update(remove.current_pose_2d)
+                # keep.feature_gallery.extend(remove.feature_gallery)
+                
+                # print(f" Fusion: Track {remove_id} → Track {keep_id} (dist:{dist:.0f}mm, app:{app:.2f})")
+                # del self.global_tracks[remove_id]
+
+                #modifs
                 keep.current_bbox.update(remove.current_bbox)
                 keep.current_pose_2d.update(remove.current_pose_2d)
                 keep.feature_gallery.extend(remove.feature_gallery)
-                
+
+                # transférer aussi les tracklets locaux connus
+                for cam_id, tid in remove.last_tracklet_id.items():
+                    keep.last_tracklet_id[cam_id] = tid
+                    self.tracklet_registry[(cam_id, tid)] = {
+                        "global_id": keep_id,
+                        "frame_idx": self.frame_count
+                    }
+
                 print(f" Fusion: Track {remove_id} → Track {keep_id} (dist:{dist:.0f}mm, app:{app:.2f})")
                 del self.global_tracks[remove_id]
 
@@ -2080,18 +2335,59 @@ class RobustMultiViewTracker:
                                         self._update_matched_track(track, group, frame_idx)
                                         return track
         
+        #ancienne version V4
+        # # Vérifications de qualité avant création
+        # if avg_visibility < self.params['min_visibility_for_new_track']:
+        #     return None
+        
+        # if np.mean([d.get('confidence', 0.0) for d in group]) < self.params['min_confidence_for_new_track']:
+        #     return None
+        
+        # # Créer nouvelle track
+        # gid = self.next_global_id
+
+        #modifs
         # Vérifications de qualité avant création
         if avg_visibility < self.params['min_visibility_for_new_track']:
             return None
-        
+
         if np.mean([d.get('confidence', 0.0) for d in group]) < self.params['min_confidence_for_new_track']:
             return None
-        
+
+        # Empêcher le vol d'un tracklet local récemment utilisé
+        for d in group:
+            cid = d["camera_id"]
+            tid = d.get("tracklet_id")
+
+            if tid is None:
+                continue
+
+            owner = self._get_recent_tracklet_owner(cid, tid, frame_idx, max_age=10)
+
+            if owner is not None and owner in self.global_tracks:
+                old_track = self.global_tracks[owner]
+                if old_track.state != TrackState.Lost:
+                    print(f" Création annulée: tracklet local ({cid}, {tid}) récemment vu sur Track {owner}")
+                    return None
+
         # Créer nouvelle track
         gid = self.next_global_id
         self.next_global_id += 1
         track = GlobalTrack(global_id=gid, first_seen_frame=frame_idx, last_seen_frame=frame_idx)
         
+        #V4
+        # for d in group:
+        #     cid = d["camera_id"]
+        #     meas = bbox_to_kalman_format(d["bbox"])
+        #     m, c = self.kf.initiate(meas)
+        #     track.kf2d_mean_by_cam[cid] = m
+        #     track.kf2d_cov_by_cam[cid] = c
+
+        #     if d.get("tracklet_id") is not None:
+        #         track.last_tracklet_id[cid] = d["tracklet_id"]
+        # track.update_features(group_features)
+
+        #modifs
         for d in group:
             cid = d["camera_id"]
             meas = bbox_to_kalman_format(d["bbox"])
@@ -2099,8 +2395,14 @@ class RobustMultiViewTracker:
             track.kf2d_mean_by_cam[cid] = m
             track.kf2d_cov_by_cam[cid] = c
 
-            if d.get("tracklet_id") is not None:
-                track.last_tracklet_id[cid] = d["tracklet_id"]
+            tid = d.get("tracklet_id")
+            if tid is not None:
+                track.last_tracklet_id[cid] = tid
+                self.tracklet_registry[(cid, tid)] = {
+                    "global_id": gid,
+                    "frame_idx": frame_idx
+                }
+
         track.update_features(group_features)
         
         if group_3d_info_new:

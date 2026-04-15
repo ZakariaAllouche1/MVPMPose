@@ -280,6 +280,9 @@ class GlobalTrack:
     last_triangulated_frame: int = -1
     single_view_streak: int = 0  # Compteur de frames consécutives avec une seule vue
     multi_view_history: deque = field(default_factory=lambda: deque(maxlen=30))  # Historique vue unique/multiple
+
+    kf2d_mean_by_cam: Dict[int, np.ndarray] = field(default_factory=dict)   #modif: stocker les KF 2D par caméra pour chaque track
+    kf2d_cov_by_cam: Dict[int, np.ndarray] = field(default_factory=dict)    #modif: stocker les KF 2D par caméra pour chaque track
     
     def update_3d_position_with_validation(self, new_pos_3d: np.ndarray):
         """Mise à jour 3D avec validation de cohérence"""
@@ -719,11 +722,12 @@ class RobustMultiViewTracker:
         
         # Utilisation de YOLOv8-seg 
         results = self.yolo_models[cam_id].track(frame, persist=True, conf=self.params['confidence_thresh'], verbose=False, classes=[0], tracker="bytetrack.yaml")
-        if not results or not results[0].boxes or results[0].boxes.id is None:
+        if not results or not results[0].boxes : # modif: ne plus dépendre de box id
             return []
             
         yolo_boxes = results[0].boxes
         yolo_masks = results[0].masks
+        yolo_ids = results[0].boxes.id  # conserver yolo ids s'ils sont disponibles
         
         if yolo_masks is None:
             yolo_masks = None
@@ -746,7 +750,7 @@ class RobustMultiViewTracker:
     
         for i, box in enumerate(yolo_boxes):
             x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
-            det = {"bbox": (x1, y1, x2, y2), "features": None, "confidence": float(box.conf[0]), "camera_id": cam_id}
+            det = {"bbox": (x1, y1, x2, y2), "features": None, "confidence": float(box.conf[0]), "camera_id": cam_id,"tracklet_id": int(yolo_ids[i]) if yolo_ids is not None else None}
             
             if yolo_masks is not None and i < len(yolo_masks.data):
                 mask = yolo_masks.data[i].cpu().numpy()
@@ -1119,15 +1123,40 @@ class RobustMultiViewTracker:
                     gating_multiplier = 2.0
     
                 # Motion cost (2D)
-                motion_cost = INFTY_COST
-                avg_bbox = np.mean([d['bbox'] for d in group], axis=0)
-                measurement_2d = bbox_to_kalman_format(avg_bbox)
-                if track.kf_mean is not None:
-                    gating_thresh_motion = chi2inv95[4] * gating_multiplier
-                    motion_cost = self.kf.gating_distance(track.kf_mean, track.kf_covariance, np.array([measurement_2d]))[0]
-                    if motion_cost > gating_thresh_motion:
+                # motion_cost = INFTY_COST
+                # avg_bbox = np.mean([d['bbox'] for d in group], axis=0)
+                # measurement_2d = bbox_to_kalman_format(avg_bbox)
+                # if track.kf_mean is not None:
+                #     gating_thresh_motion = chi2inv95[4] * gating_multiplier
+                #     motion_cost = self.kf.gating_distance(track.kf_mean, track.kf_covariance, np.array([measurement_2d]))[0]
+                #     if motion_cost > gating_thresh_motion:
+                #         continue
+                #     motion_cost /= gating_thresh_motion
+
+                motion_costs = []
+                gating_thresh_motion = chi2inv95[4] * gating_multiplier
+
+                for d in group:
+                    cid = d["camera_id"]
+                    if cid not in track.kf2d_mean_by_cam:
                         continue
-                    motion_cost /= gating_thresh_motion
+
+                    meas = bbox_to_kalman_format(d["bbox"])
+                    m = track.kf2d_mean_by_cam[cid]
+                    c = track.kf2d_cov_by_cam[cid]
+                    maha = self.kf.gating_distance(m, c, np.array([meas]))[0]
+
+                    if maha > gating_thresh_motion:
+                        motion_costs = None
+                        break
+
+                    motion_costs.append(maha / gating_thresh_motion)
+
+                if motion_costs is None:
+                    continue  # gating reject
+
+                # si aucun KF2D dispo pour les cams du groupe (rare), on met un coût neutre
+                motion_cost = float(np.mean(motion_costs)) if motion_costs else 0.5
     
                 # Spatial cost (3D)
                 spat_cost = INFTY_COST
@@ -1218,11 +1247,19 @@ class RobustMultiViewTracker:
             self._update_pose_data_in_track(track, d)
         
         # Mise à jour du filtre de Kalman 2D
-        avg_bbox = np.mean([d['bbox'] for d in group], axis=0)
-        measurement_2d = bbox_to_kalman_format(avg_bbox)
-        track.kf_mean, track.kf_covariance = self.kf.update(
-            track.kf_mean, track.kf_covariance, measurement_2d
-        )
+        for d in group:
+            cid = d["camera_id"]
+            meas = bbox_to_kalman_format(d["bbox"])
+
+            if cid not in track.kf2d_mean_by_cam:
+                m, c = self.kf.initiate(meas)
+            else:
+                m = track.kf2d_mean_by_cam[cid]
+                c = track.kf2d_cov_by_cam[cid]
+                m, c = self.kf.update(m, c, meas)
+
+            track.kf2d_mean_by_cam[cid] = m
+            track.kf2d_cov_by_cam[cid] = c
         
         # Calculer le ratio de visibilité
         track.last_visible_ratio = self._estimate_group_visibility_ratio(group)
@@ -1352,7 +1389,9 @@ class RobustMultiViewTracker:
                     print(f" Track {track.global_id}: Dégradation 3D → 2D (vue unique prolongée)")
         
         # Mise à jour de l'aspect ratio pour détecter les changements de forme
+        avg_bbox = np.mean([d['bbox'] for d in group], axis=0)
         current_bbox = avg_bbox
+        
         aspect_ratio = (current_bbox[2] - current_bbox[0]) / max(1, current_bbox[3] - current_bbox[1])
         track.aspect_ratio_history.append(aspect_ratio)
         
@@ -1559,6 +1598,12 @@ class RobustMultiViewTracker:
             if track.state != TrackState.Lost: track.age += 1
             if track.kf_mean is not None:
                 track.kf_mean, track.kf_covariance = self.kf.predict(track.kf_mean, track.kf_covariance)
+            for cid in list(track.kf2d_mean_by_cam.keys()):
+                m = track.kf2d_mean_by_cam[cid]
+                c = track.kf2d_cov_by_cam[cid]
+                m, c = self.kf.predict(m, c)
+                track.kf2d_mean_by_cam[cid] = m
+                track.kf2d_cov_by_cam[cid] = c
             if track.mean_3d is not None:
                 track.mean_3d, track.covariance_3d = track.kf_3d.predict(track.mean_3d, track.covariance_3d)
             track.current_bbox.clear(); track.current_pose_2d.clear(); track.current_mask.clear()
@@ -1566,7 +1611,7 @@ class RobustMultiViewTracker:
         
         active_tracks = [t for t in self.global_tracks.values() if t.state != TrackState.Lost]
         
-        self._update_occlusion_state(active_tracks)
+        # self._update_occlusion_state(active_tracks)  #mauvais endroit
 
         all_dets = [det for dets in dets_per_cam.values() for det in dets]
         groups = self._group_detections(all_dets)
@@ -1587,7 +1632,7 @@ class RobustMultiViewTracker:
         for track_id, group_idx in matches:
             if track_id in self.global_tracks:
                 self._update_matched_track(self.global_tracks[track_id], groups[group_idx], frame_idx)
-        
+        self._update_occlusion_state(active_tracks) # les bbox existent donc  occlusion valable
         matched_track_positions = [self.global_tracks[tid].mean_3d[:3] for tid, _ in matches if self.global_tracks.get(tid) and self.global_tracks[tid].has_3d]
         for track_id in unmatched_track_ids:
             track = self.global_tracks.get(track_id)
@@ -1886,12 +1931,11 @@ class RobustMultiViewTracker:
                         for d in group:
                             cam_id = d['camera_id']
                             # Chercher la dernière position connue dans cette caméra
-                            if cam_id in track.current_bbox or (track.kf_mean is not None):
+                            if cam_id in track.current_bbox or (cam_id in track.kf2d_mean_by_cam):
                                 if cam_id in track.current_bbox:
                                     prev_bbox = track.current_bbox[cam_id]
                                 else:
-                                    # Utiliser la prédiction Kalman 2D
-                                    pred_bbox = kalman_to_bbox_format(track.kf_mean)
+                                    pred_bbox = kalman_to_bbox_format(track.kf2d_mean_by_cam[cam_id])
                                     prev_bbox = pred_bbox
                                 
                                 curr_bbox = d['bbox']
@@ -1980,8 +2024,12 @@ class RobustMultiViewTracker:
         self.next_global_id += 1
         track = GlobalTrack(global_id=gid, first_seen_frame=frame_idx, last_seen_frame=frame_idx)
         
-        avg_bbox = np.mean([d['bbox'] for d in group], axis=0)
-        track.kf_mean, track.kf_covariance = self.kf.initiate(bbox_to_kalman_format(avg_bbox))
+        for d in group:
+            cid = d["camera_id"]
+            meas = bbox_to_kalman_format(d["bbox"])
+            m, c = self.kf.initiate(meas)
+            track.kf2d_mean_by_cam[cid] = m
+            track.kf2d_cov_by_cam[cid] = c
         track.update_features(group_features)
         
         if group_3d_info_new:
@@ -1995,8 +2043,9 @@ class RobustMultiViewTracker:
         track.single_view_streak = 0 if len(group) > 1 else 1
         
         self.global_tracks[gid] = track
-        self._update_matched_track(track, group, frame_idx)
         track.state = TrackState.Tentative
+        self._update_matched_track(track, group, frame_idx)
+        # track.state = TrackState.Tentative #Ça peut écraser un Confirmed3D déplacé avant update
         
         print(f" CREATED Track {gid} (vues: {len(group)})")
         return track
@@ -2295,12 +2344,12 @@ class RobustMultiViewTracker:
 
 def main():
     BASE_VIDEOS_PATH = r"\\intram\Paris\Labo\IBHGC\PROJETS\metasport\DATA\METASPORT11\Session1\Files\fichiers_video\Bruts" 
-    BASE_OUTPUT_PATH = "./results/videos_V2_detect/ResultsMETASPORT11Rtmlib_V3" 
+    BASE_OUTPUT_PATH = "./results/videos_V3/ResultsMETASPORT11Rtmlib_V3" 
     os.makedirs(BASE_OUTPUT_PATH, exist_ok=True)
     print(f"Dossier de sortie principal: {BASE_OUTPUT_PATH}")
     
     tracker = RobustMultiViewTracker(
-        model_path="yolo26x.pt",
+        model_path="yolo26x-seg.pt",
         feature_model_path="./pretrained_models/osnet_ain_x1_0_M.onnx",
         rtmlib_device='cuda',
         rtmlib_backend='onnxruntime',

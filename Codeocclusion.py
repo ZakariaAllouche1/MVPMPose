@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# V4
+# V6
 import os
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 import glob
@@ -383,7 +383,6 @@ class FeatureExtraction:
         return feat / (np.linalg.norm(feat, axis=1, keepdims=True) + 1e-12)
 
 def parse_xcp(filepath):
-    "Vicon radial2 parametre de distorition n'est pas utilisé. j'ai testé son utilisation ça n'a rien apporté de plus bien au contraire"
     tree = ET.parse(filepath)
     root = tree.getroot()
     cameras = {}
@@ -500,7 +499,13 @@ class RobustMultiViewTracker:
             'occlusion_reid_threshold_mm': 1200.0,
             'max_occlusion_frames': 100,
             # NOUVEAU: Seuil pour le contrôle de cohérence
-            'SPATIAL_CONSISTENCY_THRESH_MM': 1000.0
+            'SPATIAL_CONSISTENCY_THRESH_MM': 1000.0,
+            # --- nouveau : bootstrap de début de vidéo ---
+            'bootstrap_frames': 30,
+            'bootstrap_min_views_for_3d': 3,
+            'bootstrap_reproj_conf_thresh': 0.45,
+            'bootstrap_intra_frame_thresh': 0.20,
+            'bootstrap_max_reproj_error_per_view': 80.0,
         }
         self.debug = debug
         #if self.debug:
@@ -846,10 +851,15 @@ class RobustMultiViewTracker:
             track.current_pose_2d[cid] = detection['pose_2d']
             track.pose_2d_confidence[cid] = detection.get('pose_confidence', 0.5)
             track.current_pose_2d_joint_confidences[cid] = detection.get('pose_2d_joint_confidences', np.full(len(detection['pose_2d']), 0.5))
-
+    #updated
     def _triangulate_group(self, group: List[Dict]) -> Optional[Tuple[np.ndarray, float, float]]:
         valid_dets = [d for d in group if 'pose_2d' in d]
-        if len(valid_dets) < self.params['min_views_for_3d']:
+
+        required_views = self.params['min_views_for_3d']
+        if self.frame_count < self.params['bootstrap_frames']:
+            required_views = self.params['bootstrap_min_views_for_3d']
+
+        if len(valid_dets) < required_views:
             return None
         
         centers_2d, weights, proj_matrices = [], [], []
@@ -895,8 +905,10 @@ class RobustMultiViewTracker:
             weights.append(weight)
             #proj_matrices.append(self.projection_matrices[d['camera_id']])
             proj_matrices.append(self.P_by_camid[d['camera_id']])
-    
-        if len(centers_2d) < self.params['min_views_for_3d']:
+        #ancien
+        # if len(centers_2d) < self.params['min_views_for_3d']:
+        #modif
+        if len(centers_2d) < required_views:
             return None
     
 
@@ -915,7 +927,10 @@ class RobustMultiViewTracker:
             if sum(cheirality_checks) < len(valid_dets):
                 # Si échec, essayer avec seulement les vues qui passent la cheiralité
                 valid_indices = [i for i, check in enumerate(cheirality_checks) if check]
-                if len(valid_indices) >= 2:
+                #ancien
+                # if len(valid_indices) >= 2:
+                #update
+                if len(valid_indices) >= required_views:
                     centers_2d_valid = [centers_2d[i] for i in valid_indices]
                     weights_valid = [weights[i] for i in valid_indices]
                     proj_matrices_valid = [proj_matrices[i] for i in valid_indices]
@@ -935,38 +950,79 @@ class RobustMultiViewTracker:
                     errors.append(np.linalg.norm(proj_2d - c))
                 else:
                     errors.append(1000.0)  # Pénalité élevée si derrière la caméra
+            #ancien
+            # mean_error = float(np.mean(errors))
+
+
+            # #  Adapter le seuil pour les mouvements rapides
+            # adaptive_threshold = self.params['reprojection_error_thresh']
             
+            # # Vérifier si c'est un mouvement rapide (sledPush)
+            # if len(valid_dets) >= 2:
+            #     # Calculer la disparité entre les vues
+            #     bbox_sizes = []
+            #     for d in valid_dets:
+            #         bbox = d['bbox']
+            #         bbox_size = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+            #         bbox_sizes.append(bbox_size)
+                
+            #     # Si grande variation de taille = mouvement rapide/proche caméra
+            #     size_variance = np.var(bbox_sizes) / np.mean(bbox_sizes)**2
+            #     if size_variance > 0.3:  # Grande variance = mouvement dynamique
+            #         adaptive_threshold *= 2.0  # Plus tolérant
+            #         #print(f"🏃 Mouvement rapide détecté, seuil adapté à {adaptive_threshold}")
+            
+            # if np.mean(weights) < 0.5:  # Détections de faible qualité
+            #     adaptive_threshold *= 1.5
+            
+            
+            # if mean_error > adaptive_threshold:
+            #     return None
+            
+            # reproj_conf = 1.0 - (mean_error / adaptive_threshold)
+            # pose_conf = float(np.mean([d.get('pose_confidence', 0.5) for d in valid_dets]))
+            
+            # return center_3d, reproj_conf, pose_conf
+
+            #updated
             mean_error = float(np.mean(errors))
+            max_error = float(np.max(errors))
 
-
-            #  Adapter le seuil pour les mouvements rapides
             adaptive_threshold = self.params['reprojection_error_thresh']
-            
-            # Vérifier si c'est un mouvement rapide (sledPush)
+
             if len(valid_dets) >= 2:
-                # Calculer la disparité entre les vues
                 bbox_sizes = []
                 for d in valid_dets:
                     bbox = d['bbox']
                     bbox_size = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
                     bbox_sizes.append(bbox_size)
-                
-                # Si grande variation de taille = mouvement rapide/proche caméra
+
                 size_variance = np.var(bbox_sizes) / np.mean(bbox_sizes)**2
-                if size_variance > 0.3:  # Grande variance = mouvement dynamique
-                    adaptive_threshold *= 2.0  # Plus tolérant
-                    #print(f"🏃 Mouvement rapide détecté, seuil adapté à {adaptive_threshold}")
-            
-            if np.mean(weights) < 0.5:  # Détections de faible qualité
+                if size_variance > 0.3:
+                    adaptive_threshold *= 2.0
+
+            if np.mean(weights) < 0.5:
                 adaptive_threshold *= 1.5
-            
-            
+
             if mean_error > adaptive_threshold:
                 return None
-            
+
+            # --- nouveau : rejet d'une vue aberrante ---
+            per_view_thresh = min(
+                self.params['bootstrap_max_reproj_error_per_view'],
+                adaptive_threshold * 1.2
+            )
+
+            # Pendant le bootstrap, être encore plus strict
+            if self.frame_count < self.params['bootstrap_frames']:
+                per_view_thresh = min(per_view_thresh, 60.0)
+
+            if max_error > per_view_thresh:
+                return None
+
             reproj_conf = 1.0 - (mean_error / adaptive_threshold)
             pose_conf = float(np.mean([d.get('pose_confidence', 0.5) for d in valid_dets]))
-            
+
             return center_3d, reproj_conf, pose_conf
             
         except (np.linalg.LinAlgError, ValueError) as e:
@@ -1002,7 +1058,16 @@ class RobustMultiViewTracker:
                     mean_appearance_cost = float(np.mean(inter_costs))
                     w_spatial = 0.7 if spatial_score > 0.5 else 0.3
                     combined_cost = (1.0 - w_spatial) * mean_appearance_cost + w_spatial * (1 - spatial_score)
-                    if combined_cost < self.params['intra_frame_thresh'] and combined_cost < min_combined_cost:
+                    #ancien
+                    # if combined_cost < self.params['intra_frame_thresh'] and combined_cost < min_combined_cost:
+                    #     min_combined_cost, best_pair = combined_cost, (c1_key, c2_key)
+
+                    #updated
+                    local_intra_thresh = self.params['intra_frame_thresh']
+                    if self.frame_count < self.params['bootstrap_frames']:
+                        local_intra_thresh = self.params['bootstrap_intra_frame_thresh']
+
+                    if combined_cost < local_intra_thresh and combined_cost < min_combined_cost:
                         min_combined_cost, best_pair = combined_cost, (c1_key, c2_key)
             if best_pair == (-1, -1):
                 break
@@ -1184,44 +1249,44 @@ class RobustMultiViewTracker:
         return True
 
 
-    def _compute_pose_cost_single(self, track: GlobalTrack, detection: Dict) -> float:
-        cid = detection["camera_id"]
+    # def _compute_pose_cost_single(self, track: GlobalTrack, detection: Dict) -> float:
+    #     cid = detection["camera_id"]
 
-        if cid not in track.current_pose_2d:
-            return 0.5
-        if detection.get("pose_2d") is None:
-            return 0.5
+    #     if cid not in track.current_pose_2d:
+    #         return 0.5
+    #     if detection.get("pose_2d") is None:
+    #         return 0.5
 
-        pose_prev = track.current_pose_2d[cid]
-        pose_curr = detection["pose_2d"]
+    #     pose_prev = track.current_pose_2d[cid]
+    #     pose_curr = detection["pose_2d"]
 
-        conf_prev = track.current_pose_2d_joint_confidences.get(cid, None)
-        conf_curr = detection.get("pose_2d_joint_confidences", None)
+    #     conf_prev = track.current_pose_2d_joint_confidences.get(cid, None)
+    #     conf_curr = detection.get("pose_2d_joint_confidences", None)
 
-        if conf_prev is None or conf_curr is None:
-            return 0.5
+    #     if conf_prev is None or conf_curr is None:
+    #         return 0.5
 
-        valid = (conf_prev > 0.4) & (conf_curr > 0.4)
-        if np.sum(valid) < 4:
-            return 0.5
+    #     valid = (conf_prev > 0.4) & (conf_curr > 0.4)
+    #     if np.sum(valid) < 4:
+    #         return 0.5
 
-        p1 = pose_prev[valid].astype(float)
-        p2 = pose_curr[valid].astype(float)
+    #     p1 = pose_prev[valid].astype(float)
+    #     p2 = pose_curr[valid].astype(float)
 
-        # normalisation translation
-        c1 = np.mean(p1, axis=0)
-        c2 = np.mean(p2, axis=0)
-        p1 = p1 - c1
-        p2 = p2 - c2
+    #     # normalisation translation
+    #     c1 = np.mean(p1, axis=0)
+    #     c2 = np.mean(p2, axis=0)
+    #     p1 = p1 - c1
+    #     p2 = p2 - c2
 
-        # normalisation échelle
-        s1 = np.mean(np.linalg.norm(p1, axis=1)) + 1e-6
-        s2 = np.mean(np.linalg.norm(p2, axis=1)) + 1e-6
-        p1 /= s1
-        p2 /= s2
+    #     # normalisation échelle
+    #     s1 = np.mean(np.linalg.norm(p1, axis=1)) + 1e-6
+    #     s2 = np.mean(np.linalg.norm(p2, axis=1)) + 1e-6
+    #     p1 /= s1
+    #     p2 /= s2
 
-        err = np.mean(np.linalg.norm(p1 - p2, axis=1))
-        return float(min(1.0, err / 0.5))
+    #     err = np.mean(np.linalg.norm(p1 - p2, axis=1))
+    #     return float(min(1.0, err / 0.5))
 
     #fin modifs
 
@@ -1403,19 +1468,20 @@ class RobustMultiViewTracker:
                 #     cost_matrix[i, j] = total_cost
 
                 #modif
-                # 1) coût de base existant
-                base_cost = (w_app * app_cost[i, j] + w_mot * motion_cost + w_spat * spat_cost)
+                # # 1) coût de base existant
+                # base_cost = (w_app * app_cost[i, j] + w_mot * motion_cost + w_spat * spat_cost)
 
-                # 2) coût de pose (nouveau)
-                pose_costs = []
-                for d in group:
-                    if d.get("pose_2d") is not None:
-                        pose_costs.append(self._compute_pose_cost_single(track, d))
+                # # 2) coût de pose (nouveau)
+                # pose_costs = []
+                # for d in group:
+                #     if d.get("pose_2d") is not None:
+                #         pose_costs.append(self._compute_pose_cost_single(track, d))
 
-                pose_cost = float(np.mean(pose_costs)) if pose_costs else 0.5
+                # pose_cost = float(np.mean(pose_costs)) if pose_costs else 0.5
 
-                # 3) fusion : on garde ta logique dynamique + on ajoute un peu la pose
-                total_cost = 0.85 * base_cost + 0.15 * pose_cost
+                # # 3) fusion : on garde ta logique dynamique + on ajoute un peu la pose
+                # total_cost = 0.85 * base_cost + 0.15 * pose_cost
+                total_cost = (w_app * app_cost[i, j] + w_mot * motion_cost + w_spat * spat_cost)
 
                 # Pénalité de proximité avec d'autres tracks (seulement si 3D disponible)
                 if track.has_3d and group_3d_info:
@@ -2183,6 +2249,15 @@ class RobustMultiViewTracker:
         
         group_3d_info_new = self._triangulate_group(group)
 
+        # --- nouveau : garde-fou de bootstrap ---
+        if self.frame_count < self.params['bootstrap_frames']:
+            if len(group) < self.params['bootstrap_min_views_for_3d']:
+                return None
+            if group_3d_info_new is None:
+                return None
+            if group_3d_info_new[1] < self.params['bootstrap_reproj_conf_thresh']:
+                return None
+
         if group_3d_info_new:
             pos_3d_new, reproj_conf, _ = group_3d_info_new
             
@@ -2534,13 +2609,59 @@ class RobustMultiViewTracker:
                 #     full_proj_pts = np.full_like(track.current_pose_3d[:, :2], np.nan)
                 #     full_proj_pts[valid_mask] = proj2d
                 #     self._draw_skeleton_custom(vis, full_proj_pts, self.joint_edges, (255, 0, 0), 3)
+                
+                #à vérifier
+                # if (cam_id in track.current_pose_2d and track.current_pose_3d is not None and np.any(~np.isnan(track.current_pose_3d[:, 0])) and track.pose_3d_confidence > 0.35):
+                #     valid_mask= ~np.isnan(track.current_pose_3d[:, 0])
+                #     proj2d = self.project_3d_to_2d(track.current_pose_3d[valid_mask], self.P_by_camid[cam_id])
+                #     full_proj_pts = np.full_like(track.current_pose_3d[:, :2], np.nan)
+                #     full_proj_pts[valid_mask] = proj2d
+                #     self._draw_skeleton_custom(vis, full_proj_pts, self.joint_edges, (255, 0, 0), 3)
 
-                if (cam_id in track.current_pose_2d and track.current_pose_3d is not None and np.any(~np.isnan(track.current_pose_3d[:, 0])) and track.pose_3d_confidence > 0.35):
-                    valid_mask= ~np.isnan(track.current_pose_3d[:, 0])
-                    proj2d = self.project_3d_to_2d(track.current_pose_3d[valid_mask], self.P_by_camid[cam_id])
+                if (
+                    cam_id in track.current_pose_2d
+                    and track.current_pose_3d is not None
+                    and np.any(~np.isnan(track.current_pose_3d[:, 0]))
+                    and track.pose_3d_confidence > 0.35
+                ):
+                    valid_mask = ~np.isnan(track.current_pose_3d[:, 0])
+
+                    proj2d = self.project_3d_to_2d(
+                        track.current_pose_3d[valid_mask],
+                        self.P_by_camid[cam_id]
+                    )
+
                     full_proj_pts = np.full_like(track.current_pose_3d[:, :2], np.nan)
                     full_proj_pts[valid_mask] = proj2d
-                    self._draw_skeleton_custom(vis, full_proj_pts, self.joint_edges, (255, 0, 0), 3)
+
+                    # Vérification de cohérence avec la pose 2D de cette caméra
+                    pose2d_cam = track.current_pose_2d[cam_id]
+                    confs_cam = track.current_pose_2d_joint_confidences.get(
+                        cam_id,
+                        np.ones(len(pose2d_cam), dtype=float)
+                    )
+
+                    compare_mask = (
+                        valid_mask
+                        & (confs_cam > 0.3)
+                        & ~np.isnan(pose2d_cam[:, 0])
+                        & ~np.isnan(pose2d_cam[:, 1])
+                    )
+
+                    if np.sum(compare_mask) >= 4:
+                        reproj_err = np.mean(
+                            np.linalg.norm(
+                                full_proj_pts[compare_mask] - pose2d_cam[compare_mask],
+                                axis=1
+                            )
+                        )
+
+                        # Seuil à ajuster si besoin
+                        if reproj_err < 45.0:
+                            self._draw_skeleton_custom(vis, full_proj_pts, self.joint_edges, (255, 0, 0), 3)
+                    else:
+                        # Pas assez de points fiables -> on ne dessine pas le bleu
+                        pass
             writer.write(cv2.resize(vis, self.save_resolution))
 
 

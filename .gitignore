@@ -307,10 +307,16 @@ pyrightconfig.json
 
 
 /results/
+/results_*/
+labels
+/yolo_dataset_clean_2/
+/yolo_dataset_clean_V1/
+/GT_detect_metasport*/
 /finished/
 .vscode/
 /yolo_dataset/
 *.pt
+/eval_detection_subject*/
 /runs/
 /yolo_dataset1/
 *.mp4
@@ -324,6 +330,13 @@ pyrightconfig.json
 *.png
 *.jpg
 *.zip
+/eval_tracking_subject*/
+/GT_tracking/
+/GT_tracking_metasport*/
+/GT_track_metasport*/
+/mot_import_tmp/
+*.xcp
+*.json
 # --- Autoriser les données prétraitées ---
 !data/preprocessed/
 !data/preprocessed/**

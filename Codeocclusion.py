@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
-"""
-Tracker multi-personnes — Contrôle de Cohérence Spatio-Temporelle
-  Après l'association, le système vérifie pour chaque ID si toutes
-  ses instances (détections actuelles + positions prédites) sont spatialement
-  cohérentes (en  3D). Si un ID est détecté à deux
-  endroits trop éloignés simultanément (un "split ID"), la correspondance la moins
-  fiable est annulée. "SPATIAL_CONSISTENCY_THRESH_MM" a été
-  ajouté pour définir la distance maximale tolérée entre deux instances d'un même ID.
-
-"""
-
+# V4
 import os
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 import glob
@@ -393,48 +382,8 @@ class FeatureExtraction:
         feat = self.ort_session.run(None, {self.ort_session.get_inputs()[0].name: image})[0]
         return feat / (np.linalg.norm(feat, axis=1, keepdims=True) + 1e-12)
 
-
-#Batching d'OSNet
-# class FeatureExtraction:
-#     def __init__(self, onnx_path: str):
-#         self.ort_session = ort.InferenceSession(onnx_path)
-#         h, w = self.ort_session.get_inputs()[0].shape[2:4]
-#         self.augment = A.Compose([A.Resize(h, w), A.Normalize(), ToTensorV2()])
-
-#     def predict_batch(self, imgs:List[np.ndarray]) -> List[Optional[np.ndarray]]:
-#         "pour traiter une liste d'images en une seule passe Onnx"
-#         if not imgs:
-#             return []
-        
-#         processed_imgs = []
-#         valid_indices = []
-
-#         for idx, img in enumerate(imgs):
-#             if img is None or img.size ==0:
-#                 continue
-#             image=self.augment(image=cv2.cvtColor(img,cv2.COLOR_BGR2RGB))["image"]
-#             image = image.detach().cpu().numpy().astype(np.float32)
-#             processed_imgs.append(image)
-#             valid_indices.append(idx)
-
-#         if not processed_imgs:
-#             return [None] * len(imgs)
-        
-#         batch_tensor = np.stack(processed_imgs, axis=0)
-
-#         feats = self.ort_session.run(None, {self.ort_session.get_inputs()[0].name: batch_tensor})[0]
-        
-#         feats=feats / (np.linalg.norm(feats, axis=1, keepdims=True) +1e-12)
-
-#         results = [None] * len(imgs)
-
-#         for i, valid_idx in enumerate(valid_indices):
-#             results[valid_idx] = feats[i]
-        
-#         return results
-
-
 def parse_xcp(filepath):
+    "Vicon radial2 parametre de distorition n'est pas utilisé. j'ai testé son utilisation ça n'a rien apporté de plus bien au contraire"
     tree = ET.parse(filepath)
     root = tree.getroot()
     cameras = {}
@@ -751,202 +700,6 @@ class RobustMultiViewTracker:
         x2, y2 = int(min(w, x2 + margin_x)), int(min(h, y2 + margin_y))
         return (x1, y1, x2, y2) if x1 < x2 and y1 < y2 else None
 
-    # def _process_single_view(self, frame: np.ndarray, cam_id: int) -> List[Dict]:
-    #     detections = []
-    #     try:
-    #         keypoints_list, scores_list = self.pose_estimator(frame)
-    #     except Exception as e:
-    #         print(f" Erreur RTMLib caméra {cam_id}: {e}")
-    #         return []
-        
-    #     all_poses_2d = np.array(keypoints_list) if keypoints_list is not None and len(keypoints_list) > 0 else np.empty((0, 0, 2))
-    #     all_pose_confidences = np.array(scores_list) if scores_list is not None and len(scores_list) > 0 else np.empty((0, 0))
-        
-    #     # Utilisation de YOLOv8-seg 
-    #     results = self.yolo_models[cam_id].track(frame, persist=True, conf=self.params['confidence_thresh'], verbose=False, classes=[0], tracker="bytetrack.yaml")
-    #     if not results or not results[0].boxes : # modif: ne plus dépendre de box id
-    #         return []
-            
-    #     yolo_boxes = results[0].boxes
-    #     yolo_masks = results[0].masks
-    #     yolo_ids = results[0].boxes.id  # conserver yolo ids s'ils sont disponibles
-        
-    #     if yolo_masks is None:
-    #         yolo_masks = None
-        
-    #     yolo_pose_associations = {}
-    #     if len(all_poses_2d) > 0:
-    #         cost_matrix = np.full((len(yolo_boxes), len(all_poses_2d)), INFTY_COST)
-    #         for i, box in enumerate(yolo_boxes.xyxy):
-    #             x1, y1, x2, y2 = map(int, box.cpu().numpy())
-    #             box_center = np.array([(x1 + x2) / 2, (y1 + y2) / 2])
-    #             for j, pose in enumerate(all_poses_2d):
-    #                 valid_mask = all_pose_confidences[j] > self.params['min_joint_confidence_for_triangulation']
-    #                 if np.sum(valid_mask) < self.params['min_valid_joints']: continue
-    #                 pose_center = np.mean(pose[valid_mask], axis=0)
-    #                 if x1 < pose_center[0] < x2 and y1 < pose_center[1] < y2:
-    #                     cost_matrix[i, j] = np.linalg.norm(box_center - pose_center)
-            
-    #         box_indices, pose_indices = linear_sum_assignment(cost_matrix)
-    #         yolo_pose_associations = {b_idx: p_idx for b_idx, p_idx in zip(box_indices, pose_indices) if cost_matrix[b_idx, p_idx] < 200}
-    
-    #     for i, box in enumerate(yolo_boxes):
-    #         x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
-    #         det = {"bbox": (x1, y1, x2, y2), "features": None, "confidence": float(box.conf[0]), "camera_id": cam_id,"tracklet_id": int(yolo_ids[i]) if yolo_ids is not None else None}
-            
-    #         if yolo_masks is not None and i < len(yolo_masks.data):
-    #             mask = yolo_masks.data[i].cpu().numpy()
-    #             det["mask"] = mask
-            
-    #         feature_patch_box = (x1, y1, x2, y2)
-    #         if i in yolo_pose_associations:
-    #             pose_idx = yolo_pose_associations[i]
-    #             pose_kpts, pose_confs = all_poses_2d[pose_idx], all_pose_confidences[pose_idx]
-    #             det.update({"pose_2d": pose_kpts, "pose_confidence": float(np.mean(pose_confs)), "pose_2d_joint_confidences": pose_confs})
-    #             torso_box = self._get_torso_box(pose_kpts, pose_confs, frame.shape[:2])
-    #             if torso_box:
-    #                 feature_patch_box = torso_box
-    
-    #         # Extraction de features avec masque
-    #         fx1, fy1, fx2, fy2 = feature_patch_box
-    #         if fx1 < fx2 and fy1 < fy2:
-    #             patch = frame[fy1:fy2, fx1:fx2]
-                
-    #             if "mask" in det and det["mask"] is not None:
-    #                 mask_patch = self._extract_mask_patch(det["mask"], (fx1, fy1, fx2, fy2), frame.shape[:2])
-    #                 if mask_patch is not None:
-    #                     patch = self._apply_mask_to_patch(patch, mask_patch)
-                
-    #             feat = self.feature_extractor.predict(patch)
-    #             if feat is not None:
-    #                 det["features"] = feat.flatten()
-            
-    #         if det["features"] is not None:
-    #             detections.append(det)
-    #     return detections
-
-    # à vérifier et corriger 
-    # def _process_single_view(self, frame: np.ndarray, cam_id: int) -> List[Dict]:
-    #     detections = []
-
-    #     try:
-    #         keypoints_list, scores_list = self.pose_estimator(frame)
-    #     except Exception as e:
-    #         print(f" Erreur RTMLib caméra {cam_id}: {e}")
-    #         return []
-
-    #     all_poses_2d = np.array(keypoints_list) if keypoints_list is not None and len(keypoints_list) > 0 else np.empty((0, 0, 2))
-    #     all_pose_confidences = np.array(scores_list) if scores_list is not None and len(scores_list) > 0 else np.empty((0, 0))
-
-    #     results = self.yolo_models[cam_id].track(
-    #         frame, persist=True, conf=self.params['confidence_thresh'],
-    #         verbose=False, classes=[0], tracker="bytetrack.yaml"
-    #     )
-    #     if not results or not results[0].boxes:
-    #         return []
-
-    #     yolo_boxes = results[0].boxes
-    #     yolo_ids = results[0].boxes.id  # peut être None
-
-    #     # Associer bbox  pose
-    #     yolo_pose_associations = {}
-    #     if len(all_poses_2d) > 0:
-    #         cost_matrix = np.full((len(yolo_boxes), len(all_poses_2d)), INFTY_COST)
-    #         for i, box in enumerate(yolo_boxes.xyxy):
-    #             x1, y1, x2, y2 = map(int, box.cpu().numpy())
-    #             box_center = np.array([(x1 + x2) / 2, (y1 + y2) / 2])
-
-    #             for j, pose in enumerate(all_poses_2d):
-    #                 valid_mask = all_pose_confidences[j] > self.params['min_joint_confidence_for_triangulation']
-    #                 if np.sum(valid_mask) < self.params['min_valid_joints']:
-    #                     continue
-    #                 pose_center = np.mean(pose[valid_mask], axis=0)
-    #                 if x1 < pose_center[0] < x2 and y1 < pose_center[1] < y2:
-    #                     cost_matrix[i, j] = np.linalg.norm(box_center - pose_center)
-
-    #         box_indices, pose_indices = linear_sum_assignment(cost_matrix)
-    #         yolo_pose_associations = {
-    #             b_idx: p_idx for b_idx, p_idx in zip(box_indices, pose_indices)
-    #             if cost_matrix[b_idx, p_idx] < 200
-    #         }
-
-    #     H, W = frame.shape[:2]
-    #     patches_to_extract = []
-    #     dets_needing_features = []
-
-    #     for i, box in enumerate(yolo_boxes):
-    #         x1, y1, x2, y2 = map(int, box.xyxy[0].cpu().numpy())
-
-    #         tid = None
-    #         if yolo_ids is not None:
-    #             # yolo_ids[i] est souvent un tensor -> item()
-    #             try:
-    #                 tid = int(yolo_ids[i].item())
-    #             except Exception:
-    #                 try:
-    #                     tid = int(yolo_ids[i])
-    #                 except Exception:
-    #                     tid = None
-
-    #         det = {
-    #             "bbox": (x1, y1, x2, y2),
-    #             "features": None,
-    #             "confidence": float(box.conf[0]),
-    #             "camera_id": cam_id,
-    #             "tracklet_id": tid,
-    #         }
-
-    #         # 1) Choix du patch de features : torso si possible, sinon bbox shrink
-    #         feature_patch_box = None
-
-    #         if i in yolo_pose_associations:
-    #             pose_idx = yolo_pose_associations[i]
-    #             pose_kpts, pose_confs = all_poses_2d[pose_idx], all_pose_confidences[pose_idx]
-    #             det.update({
-    #                 "pose_2d": pose_kpts,
-    #                 "pose_confidence": float(np.mean(pose_confs)),
-    #                 "pose_2d_joint_confidences": pose_confs
-    #             })
-
-    #             torso_box = self._get_torso_box(pose_kpts, pose_confs, (H, W))
-    #             if torso_box is not None:
-    #                 feature_patch_box = torso_box
-
-    #         # Si pas de torso_box (ou pas de pose), fallback bbox shrink
-    #         if feature_patch_box is None:
-    #             margin_x = int((x2 - x1) * 0.10)
-    #             margin_y = int((y2 - y1) * 0.10)
-    #             fx1 = max(0, x1 + margin_x)
-    #             fy1 = max(0, y1 + margin_y)
-    #             fx2 = min(W, x2 - margin_x)
-    #             fy2 = min(H, y2 - margin_y)
-
-    #             # si shrink invalide, fallback bbox brute clampée
-    #             if fx1 >= fx2 or fy1 >= fy2:
-    #                 fx1 = max(0, x1)
-    #                 fy1 = max(0, y1)
-    #                 fx2 = min(W, x2)
-    #                 fy2 = min(H, y2)
-
-    #             feature_patch_box = (fx1, fy1, fx2, fy2)
-
-    #         fx1, fy1, fx2, fy2 = feature_patch_box
-    #         if fx2 - fx1 >= 2 and fy2 - fy1 >= 2:
-    #             patch = frame[fy1:fy2, fx1:fx2]
-    #             patches_to_extract.append(patch)
-    #             dets_needing_features.append(det)
-
-    #     # 2) Batch OSNet
-    #     if patches_to_extract:
-    #         batch_feats = self.feature_extractor.predict_batch(patches_to_extract)
-    #         for det, feat in zip(dets_needing_features, batch_feats):
-    #             if feat is not None:
-    #                 det["features"] = feat.flatten()
-    #                 detections.append(det)
-
-    #     return detections
-
-
     def _process_single_view(self, frame: np.ndarray, cam_id: int) -> List[Dict]:
         detections: List[Dict] = []
 
@@ -1216,136 +969,7 @@ class RobustMultiViewTracker:
         except (np.linalg.LinAlgError, ValueError) as e:
             print(f" Erreur triangulation: {e}")
             return None
-
-
-    # def _triangulate_group(self, group: List[Dict]) -> Optional[Tuple[np.ndarray, float, float]]:
-    #     valid_dets= [d for d in group if 'pose_2d' in d]
-    #     if len(valid_dets) < self.params['min_views_for_3d']:
-    #         return None
-        
-    #     # triangulation point par point
-    #     try:
-    #         num_joints = valid_dets[0]['pose_2d'].shape[0]
-    #     except (IndexError, AttributeError):
-    #         num_joints = 0
-
-    #     triangulated_points_3d = {}
-    #     joint_errors = []
-    #     joint_confs = []
-
-    #     for j in range(num_joints):
-    #         pts_2d, prjs, wgts, cids_joints = [], [], [], []
-
-    #         for d in valid_dets:
-    #             cid= d['camera_id']
-    #             confs= d.get('pose_2d_joint_confidences', [])
-    #             if j < len(confs) and confs[j] >= self.params['min_joint_confidence_for_triangulation']:
-    #                 pts_2d.append(d['pose_2d'][j])
-    #                 prjs.append(self.P_by_camid[cid])
-    #                 wgts.append(confs[j])
-    #                 cids_joints.append(cid)
-            
-    #         if len(pts_2d) >= self.params['min_views_for_3d']:
-    #             try:
-    #                 p3d = weighted_triangulate_points(prjs, pts_2d, wgts)
-    #                 valid_cheirality = sum(check_cheirality(p3d, self.cam_params_by_camid[cid]["R"], self.cam_params_by_camid[cid]["t"]))
-
-    #                 if valid_cheirality >= self.params['min_views_for_3d']:
-    #                     errors = []
-
-    #                     for p, pt in zip(prjs, pts_2d):
-    #                         proj_point = p @ np.append(p3d, 1)
-    #                         if proj_point[2] >0:
-    #                             proj_2d = proj_point[:2] / proj_point[2]
-    #                             errors.append(np.linalg.norm(proj_2d - pt))
-    #                         else:
-    #                             errors.append(1000.0)
-                        
-    #                     mean_err = float(np.mean(errors))
-
-    #                     if mean_err < self.params['reprojection_error_thresh'] * 1.5:
-    #                         triangulated_points_3d[j] = p3d
-    #                         joint_errors.append(mean_err)
-    #                         joint_confs.append(np.mean(wgts))
-    #             except (np.linalg.LinAlgError, ValueError):
-    #                 pass
-        
-
-    #     # calcul du centre 3 à partir des articulations 3d
-
-    #     center_3d= None
-    #     reproj_conf = 0.0
-    #     pose_conf = 0.0
-    #     adaptive_threshold = self.params['reprojection_error_thresh']
-
-    #     if triangulated_points_3d:
-    #         torso_indices = [5, 6, 11, 12]
-    #         head_indices = [0, 17, 18]
-
-    #         valid_torso = [triangulated_points_3d[i] for i in torso_indices if i in triangulated_points_3d]
-    #         valid_head = [triangulated_points_3d[i] for i in head_indices if i in triangulated_points_3d]
-
-    #         if len(valid_torso) >= 2:
-    #             center_3d = np.mean(valid_torso, axis=0)
-    #         elif len(valid_head) >= 2:
-    #             center_3d = np.mean(valid_head, axis=0)
-    #         else:
-    #             center_3d = np.mean(list(triangulated_points_3d.values()), axis=0)
-
-    #         mean_error= float(np.mean(joint_errors))
-    #         pose_error =float(np.mean(joint_confs))
-
-    #         bbox_sizes = [(d['bbox'][2] - d['bbox'][0]) * (d['bbox'][3] - d['bbox'][1]) for d in valid_dets]
-    #         size_variance = np.var(bbox_sizes) / max(1, np.mean(bbox_sizes)**2)
-
-    #         if size_variance > 0.3:
-    #             adaptive_threshold *= 2.0
-            
-    #         if mean_error > adaptive_threshold:
-    #             center_3d = None
-    #         else:
-    #             reproj_conf = max(0.0, 1.0 - (mean_error / adaptive_threshold))
-
-            
-    #     #fallback trianguler les boites yolo
-    #     if center_3d is None:
-    #         centers_2d, weights, proj_matrices = [], [], []
-
-    #         for d in valid_dets:
-    #             bbox= d['bbox']
-    #             centers_2d.append(np.array([(bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0]))
-    #             weights.append(0.2)
-    #             proj_matrices.append(self.P_by_camid[d['camera_id']])
-            
-    #         if len(centers_2d) >= self.params['min_views_for_3d']:
-    #             try:
-    #                 center_3d_fallback = weighted_triangulate_points(proj_matrices, centers_2d, weights)
-    #                 cheirality_checks = [check_cheirality(center_3d_fallback, self.cam_params_by_camid[d['camera_id']]["R"], self.cam_params_by_camid[d['camera_id']]["t"]) for d in valid_dets]
-
-    #                 if sum(cheirality_checks) >= self.params['min_views_for_3d']:
-    #                     errors = []
-
-    #                     for p, c in zip(proj_matrices, centers_2d):
-    #                         proj_point = (p @ np.append(center_3d_fallback, 1))
-    #                         if proj_point[2] > 0:
-    #                             proj_2d = proj_point[:2] / proj_point[2]
-    #                             errors.append(np.linalg.norm(proj_2d - c))
-    #                         else:
-    #                             errors.append(1000.0)
-                        
-    #                     mean_error = float(np.mean(errors))
-    #                     if mean_error < adaptive_threshold * 1.5:
-    #                         center_3d = center_3d_fallback
-    #                         reproj_conf = max(0.0, 1.0 - (mean_error / adaptive_threshold * 1.5))
-    #                         pose_conf = 0.2
-                
-    #             except (np.linalg.LinAlgError, ValueError):
-    #                 pass
-    #     if center_3d is None:
-    #         return None
-    #     return center_3d, reproj_conf, pose_conf
-            
-                            
+                 
 
     def _calculate_spatial_consistency_score(self, group1: List[Dict], group2: List[Dict]) -> float:
         cameras1, cameras2 = {d['camera_id'] for d in group1}, {d['camera_id'] for d in group2}
@@ -2599,11 +2223,18 @@ class RobustMultiViewTracker:
                         kpts[track.current_pose_2d_joint_confidences[cam_id] < 0.3] = np.nan
                         self._draw_skeleton_custom(vis, kpts, self.joint_edges, (0, 255, 0), 2)
                 
-                if track.current_pose_3d is not None and np.any(~np.isnan(track.current_pose_3d[:, 0])):
-                    valid_mask = ~np.isnan(track.current_pose_3d[:, 0])
-                    #proj2d = self.project_3d_to_2d(track.current_pose_3d[valid_mask], self.projection_matrices[cam_id])
-                    proj2d = self.project_3d_to_2d(track.current_pose_3d[valid_mask], self.P_by_camid[cam_id])
+                # if track.current_pose_3d is not None and np.any(~np.isnan(track.current_pose_3d[:, 0])):
+                #     valid_mask = ~np.isnan(track.current_pose_3d[:, 0])
+                #     #proj2d = self.project_3d_to_2d(track.current_pose_3d[valid_mask], self.projection_matrices[cam_id])
+                #     proj2d = self.project_3d_to_2d(track.current_pose_3d[valid_mask], self.P_by_camid[cam_id])
 
+                #     full_proj_pts = np.full_like(track.current_pose_3d[:, :2], np.nan)
+                #     full_proj_pts[valid_mask] = proj2d
+                #     self._draw_skeleton_custom(vis, full_proj_pts, self.joint_edges, (255, 0, 0), 3)
+
+                if (cam_id in track.current_pose_2d and track.current_pose_3d is not None and np.any(~np.isnan(track.current_pose_3d[:, 0])) and track.pose_3d_confidence > 0.35):
+                    valid_mask= ~np.isnan(track.current_pose_3d[:, 0])
+                    proj2d = self.project_3d_to_2d(track.current_pose_3d[valid_mask], self.P_by_camid[cam_id])
                     full_proj_pts = np.full_like(track.current_pose_3d[:, :2], np.nan)
                     full_proj_pts[valid_mask] = proj2d
                     self._draw_skeleton_custom(vis, full_proj_pts, self.joint_edges, (255, 0, 0), 3)
@@ -2790,13 +2421,12 @@ class RobustMultiViewTracker:
 
 def main():
     BASE_VIDEOS_PATH = r"\\intram\Paris\Labo\IBHGC\PROJETS\metasport\DATA\METASPORT12\Session1\Files\fichiers_video\Bruts" 
-    BASE_OUTPUT_PATH = "./results/videos_V3_bis_finetune/ResultsMETASPORT12Rtmlib_V3" 
+    BASE_OUTPUT_PATH = "./results/videos_V3_bis/ResultsMETASPORT12Rtmlib_V3" 
     os.makedirs(BASE_OUTPUT_PATH, exist_ok=True)
     print(f"Dossier de sortie principal: {BASE_OUTPUT_PATH}")
     
     tracker = RobustMultiViewTracker(
-        # model_path="yolo26x-seg.pt",
-        model_path="./runs/detect/train/weights/best.pt",
+        model_path="yolo26x-seg.pt",
         feature_model_path="./pretrained_models/osnet_ain_x1_0_M.onnx",
         rtmlib_device='cuda',
         rtmlib_backend='onnxruntime',
@@ -2853,4 +2483,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

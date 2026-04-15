@@ -2609,8 +2609,7 @@ class RobustMultiViewTracker:
                 #     full_proj_pts = np.full_like(track.current_pose_3d[:, :2], np.nan)
                 #     full_proj_pts[valid_mask] = proj2d
                 #     self._draw_skeleton_custom(vis, full_proj_pts, self.joint_edges, (255, 0, 0), 3)
-                
-                #à vérifier
+
                 # if (cam_id in track.current_pose_2d and track.current_pose_3d is not None and np.any(~np.isnan(track.current_pose_3d[:, 0])) and track.pose_3d_confidence > 0.35):
                 #     valid_mask= ~np.isnan(track.current_pose_3d[:, 0])
                 #     proj2d = self.project_3d_to_2d(track.current_pose_3d[valid_mask], self.P_by_camid[cam_id])
@@ -2871,6 +2870,8 @@ def main():
         SPATIAL_CONSISTENCY_THRESH_MM=1500.0,  # Augmenter pour mouvements rapides
         min_joint_confidence_for_triangulation=0.25,  # Réduire pour plus de flexibilité
         track_patience=150,  # Réduire pour nettoyer plus vite
+        bootstrap_frames=0,
+        bootstrap_min_views_for_3d=3,  #essayer avec 2 vues 
     )
 
     xcp_files = glob.glob(os.path.join(BASE_VIDEOS_PATH, "*.xcp"))

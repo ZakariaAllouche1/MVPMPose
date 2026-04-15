@@ -2295,12 +2295,12 @@ class RobustMultiViewTracker:
 
 def main():
     BASE_VIDEOS_PATH = r"\\intram\Paris\Labo\IBHGC\PROJETS\metasport\DATA\METASPORT11\Session1\Files\fichiers_video\Bruts" 
-    BASE_OUTPUT_PATH = "./results/videos_V2/ResultsMETASPORT11Rtmlib_V3" 
+    BASE_OUTPUT_PATH = "./results/videos_V2_detect/ResultsMETASPORT11Rtmlib_V3" 
     os.makedirs(BASE_OUTPUT_PATH, exist_ok=True)
     print(f"Dossier de sortie principal: {BASE_OUTPUT_PATH}")
     
     tracker = RobustMultiViewTracker(
-        model_path="yolo26x-seg.pt",
+        model_path="yolo26x.pt",
         feature_model_path="./pretrained_models/osnet_ain_x1_0_M.onnx",
         rtmlib_device='cuda',
         rtmlib_backend='onnxruntime',

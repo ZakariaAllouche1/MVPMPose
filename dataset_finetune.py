@@ -44,8 +44,8 @@ HOLDOUT_SUBJECTS = {
 # Activités à garder
 ALLOWED_TRIAL_SUFFIXES: Optional[Set[str]] = {
     "_03",
-    "_01",
-    "_02",
+    #"_01",
+    #"_02",
     # "_04",
 }
 
@@ -118,7 +118,6 @@ def safe_imwrite(path: Path, img: np.ndarray) -> None:
 
 
 def trial_from_video_name(vp: Path) -> str:
-    # Exemple : CMJump_03.xxxxxx.avi -> CMJump_03
     return vp.name.split(".", 1)[0]
 
 
@@ -144,7 +143,6 @@ def is_allowed_trial(trial_name: str) -> bool:
 
 
 def list_videos_from_subjects(subjects: Set[str]) -> List[Tuple[Path, str, str]]:
-    # Retourne : (chemin vidéo, nom activité/trial, sujet)
     out: List[Tuple[Path, str, str]] = []
 
     for subject, br in list_subject_video_dirs(subjects):
@@ -198,7 +196,6 @@ def preprocess_frame(
     video_path: Path,
     frame_idx: int,
 ) -> np.ndarray:
-    # Si tes vidéos sont déjà undistorted + floutées, ne change rien ici
     return frame
 
 

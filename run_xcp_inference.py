@@ -11,7 +11,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
+
+sys.path.insert(0, SCRIPT_DIR)
 
 from easydict import EasyDict
 import torchvision.transforms as transforms
@@ -34,7 +37,15 @@ N_JOINTS = 17
 
 SUBJECT_NAME = "METASPORT12"
 
-BASE_DIR = f"./metasport/DATA/{SUBJECT_NAME}_undistort/Session1/Files/fichiers_video"
+BASE_DIR = os.path.join(
+    PROJECT_ROOT,
+    "metasport",
+    "DATA",
+    f"{SUBJECT_NAME}_undistort",
+    "Session1",
+    "Files",
+    "fichiers_video",
+)
 BRUTS_DIR = os.path.join(BASE_DIR, "Bruts", f"{SUBJECT_NAME}_undistorted")
 TRACKED_DIR = os.path.join(BASE_DIR, "Traites", "RtmLib", f"{SUBJECT_NAME}_tracked")
 
@@ -58,19 +69,29 @@ CSV_PERSON_ID = None
 
 XCP_VARIANT = "2B"
 T_SCALE = 1.0
-BBOX_SCALE = 1.0
+BBOX_SCALE = 1.25
 CUBOID_SIDE = 2500.0
 
-ALG_WEIGHTS = (
-    "./data/pretrained/human36m/"
-    "human36m_alg_10-04-2019/"
-    "checkpoints/0060/weights.pth"
+ALG_WEIGHTS = os.path.join(
+    PROJECT_ROOT,
+    "data",
+    "pretrained",
+    "human36m",
+    "human36m_alg_10-04-2019",
+    "checkpoints",
+    "0060",
+    "weights.pth",
 )
 
-VOL_WEIGHTS = (
-    "./data/pretrained/human36m/"
-    "human36m_vol_softmax_10-08-2019/"
-    "checkpoints/0040/weights.pth"
+VOL_WEIGHTS = os.path.join(
+    PROJECT_ROOT,
+    "data",
+    "pretrained",
+    "human36m",
+    "human36m_vol_softmax_10-08-2019",
+    "checkpoints",
+    "0040",
+    "weights.pth",
 )
 
 NORMALIZE = transforms.Normalize(
@@ -109,7 +130,7 @@ def safe_torch_load(path, map_location):
         return torch.load(path, map_location=map_location)
 
 
-def sanitize_state_dict(state_dict):
+def strip_module_prefix(state_dict):
     cleaned = {}
     for k, v in state_dict.items():
         if k.startswith("module."):
@@ -237,7 +258,6 @@ def expand_square_bbox(bbox, img_shape, scale=1.0):
         return bbox
 
     top, left, bottom, right = bbox
-    h, w = img_shape[:2]
 
     cx = 0.5 * (left + right)
     cy = 0.5 * (top + bottom)
@@ -474,7 +494,7 @@ def load_alg_model():
 
     checkpoint = safe_torch_load(ALG_WEIGHTS, map_location=DEVICE)
     state_dict = checkpoint.get("model", checkpoint)
-    state_dict = sanitize_state_dict(state_dict)
+    state_dict = strip_module_prefix(state_dict)
 
     load_result = model.load_state_dict(state_dict, strict=False)
     print("ALG missing keys:", load_result.missing_keys)
@@ -528,7 +548,7 @@ def load_vol_model():
     else:
         state_dict = checkpoint
 
-    state_dict = sanitize_state_dict(state_dict)
+    state_dict = strip_module_prefix(state_dict)
 
     load_result = model.load_state_dict(state_dict, strict=False)
     print("VOL missing keys:", load_result.missing_keys)
@@ -604,7 +624,7 @@ def run_frame_alg_vol(frames_bgr, frame_idx, bbox_provider, cameras_params, alg_
         crop_w = right - left
         cam.update_after_resize((crop_h, crop_w), IMAGE_SIZE)
 
-        cameras_batch.append([cam])
+        cameras_batch.append([cam])   # [n_views][batch_size]
         images_list.append(tensor)
         proj_list.append(torch.from_numpy(P).float())
 
@@ -615,9 +635,13 @@ def run_frame_alg_vol(frames_bgr, frame_idx, bbox_provider, cameras_params, alg_
         alg_output = alg_model(images, proj_matrices, None)
         alg_kps = alg_output[0][0].cpu().numpy().astype(np.float32)
 
+        pred_kps_4d = np.zeros((N_JOINTS, 4), dtype=np.float32)
+        pred_kps_4d[:, :3] = alg_kps
+        pred_kps_4d[:, 3] = 1.0
+
         fake_batch = {
             "cameras": cameras_batch,
-            "pred_keypoints_3d": [alg_kps],
+            "pred_keypoints_3d": [pred_kps_4d],
         }
 
         vol_output = vol_model(images, proj_matrices, fake_batch)

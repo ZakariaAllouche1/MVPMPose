@@ -1,4 +1,4 @@
-# run_xcp_inference.py
+# run_xcp_inference_vol.py
 import os
 import sys
 import csv
@@ -16,18 +16,23 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from easydict import EasyDict
 import torchvision.transforms as transforms
 
-from mvn.models.triangulation import AlgebraicTriangulationNet
+from mvn.models.triangulation import (
+    AlgebraicTriangulationNet,
+    VolumetricTriangulationNet,
+)
+from mvn.utils.multiview import Camera
 from xcp_utils import load_cameras_params_from_xcp
 
 
+# =========================
 # CONFIG
-OUTPUT_ROOT = "output_xcp_alltests"
+# =========================
+OUTPUT_ROOT = "output_xcp_alltests_alg_vol"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 IMAGE_SIZE = (384, 384)
 N_JOINTS = 17
 
 SUBJECT_NAME = "METASPORT12"
-
 
 BASE_DIR = f"./metasport/DATA/{SUBJECT_NAME}_undistort/Session1/Files/fichiers_video"
 BRUTS_DIR = os.path.join(BASE_DIR, "Bruts", f"{SUBJECT_NAME}_undistorted")
@@ -53,12 +58,19 @@ CSV_PERSON_ID = None
 
 XCP_VARIANT = "2B"
 T_SCALE = 1.0
-BBOX_SCALE = 1.25
+BBOX_SCALE = 1.0
+CUBOID_SIDE = 2500.0
 
 ALG_WEIGHTS = (
     "./data/pretrained/human36m/"
     "human36m_alg_10-04-2019/"
     "checkpoints/0060/weights.pth"
+)
+
+VOL_WEIGHTS = (
+    "./data/pretrained/human36m/"
+    "human36m_vol_softmax_10-08-2019/"
+    "checkpoints/0040/weights.pth"
 )
 
 NORMALIZE = transforms.Normalize(
@@ -75,13 +87,44 @@ SKELETON = [
 ]
 
 
+# =========================
 # HELPERS
+# =========================
 def infer_cam_name_from_path(path):
     basename = os.path.basename(path)
     for cam_name, device_id in DEVICEID_BY_NAME.items():
         if device_id in basename:
             return cam_name
     return None
+
+
+def ensure_dir(path):
+    os.makedirs(path, exist_ok=True)
+
+
+def safe_torch_load(path, map_location):
+    try:
+        return torch.load(path, map_location=map_location, weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
+
+
+def sanitize_state_dict(state_dict):
+    cleaned = {}
+    for k, v in state_dict.items():
+        if k.startswith("module."):
+            cleaned[k[len("module."):]] = v
+        else:
+            cleaned[k] = v
+    return cleaned
+
+
+def mean_joint_diff(a, b):
+    return float(np.mean(np.linalg.norm(a - b, axis=1)))
+
+
+def spread_from_pelvis(kps, pelvis_idx=6):
+    return np.linalg.norm(kps - kps[pelvis_idx], axis=1)
 
 
 def discover_tests():
@@ -127,7 +170,9 @@ def discover_tests():
     return tests
 
 
+# =========================
 # CAMERAS
+# =========================
 def load_cameras_for_test(xcp_path):
     return load_cameras_params_from_xcp(
         xcp_path=xcp_path,
@@ -160,7 +205,9 @@ def build_proj_matrix(cam_params, bbox=None):
     return K @ Rt
 
 
+# =========================
 # CSV BBOX PROVIDER
+# =========================
 def normalize_camera_key(value):
     s = str(value).strip()
     try:
@@ -394,14 +441,10 @@ class CSVBBoxProvider:
             f"(clés testées: {keys_to_try}) frame={frame_idx_1based}"
         )
 
+
+# =========================
 # MODELS
-def safe_torch_load(path, map_location):
-    try:
-        return torch.load(path, map_location=map_location, weights_only=True)
-    except TypeError:
-        return torch.load(path, map_location=map_location)
-
-
+# =========================
 def load_alg_model():
     config = EasyDict({
         "model": {
@@ -426,16 +469,80 @@ def load_alg_model():
         }
     })
 
+    print(f"Chargement du modèle algébrique sur {DEVICE}...")
     model = AlgebraicTriangulationNet(config, device=DEVICE)
+
     checkpoint = safe_torch_load(ALG_WEIGHTS, map_location=DEVICE)
     state_dict = checkpoint.get("model", checkpoint)
-    model.load_state_dict(state_dict, strict=False)
+    state_dict = sanitize_state_dict(state_dict)
+
+    load_result = model.load_state_dict(state_dict, strict=False)
+    print("ALG missing keys:", load_result.missing_keys)
+    print("ALG unexpected keys:", load_result.unexpected_keys)
+
     model.eval()
     model.to(DEVICE)
+    print("Modèle algébrique chargé")
     return model
 
 
+def load_vol_model():
+    config = EasyDict({
+        "model": {
+            "name": "vol",
+            "kind": "mpii",
+            "backbone": {
+                "name": "pose_resnet",
+                "style": "simple",
+                "num_layers": 152,
+                "num_deconv_layers": 3,
+                "num_deconv_filters": [256, 256, 256],
+                "num_deconv_kernels": [4, 4, 4],
+                "num_joints": N_JOINTS,
+                "image_size": [384, 384],
+                "heatmap_size": [96, 96],
+                "init_weights": False,
+            },
+            "num_joints": N_JOINTS,
+            "volume_size": 64,
+            "volume_multiplier": 1.0,
+            "volume_softmax": True,
+            "volume_aggregation_method": "softmax",
+            "triangulation_softmax": True,
+            "use_gt_pelvis": False,
+            "pelvis_type": "pred",
+            "cuboid_side": CUBOID_SIDE,
+            "heatmap_softmax": True,
+            "heatmap_multiplier": 100.0,
+        }
+    })
+
+    print(f"Chargement du modèle volumétrique sur {DEVICE}...")
+    model = VolumetricTriangulationNet(config, device=DEVICE)
+
+    checkpoint = safe_torch_load(VOL_WEIGHTS, map_location=DEVICE)
+    if "model" in checkpoint:
+        state_dict = checkpoint["model"]
+    elif "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+    else:
+        state_dict = checkpoint
+
+    state_dict = sanitize_state_dict(state_dict)
+
+    load_result = model.load_state_dict(state_dict, strict=False)
+    print("VOL missing keys:", load_result.missing_keys)
+    print("VOL unexpected keys:", load_result.unexpected_keys)
+
+    model.eval()
+    model.to(DEVICE)
+    print("Modèle volumétrique chargé")
+    return model
+
+
+# =========================
 # VIDEO I/O
+# =========================
 def open_video_caps(video_by_name):
     caps = {}
     frame_counts = {}
@@ -455,10 +562,13 @@ def open_video_caps(video_by_name):
     return caps, frame_counts
 
 
+# =========================
 # INFERENCE
-def run_frame_alg_only(alg_model, frames_bgr, frame_idx, bbox_provider, cameras_params):
+# =========================
+def run_frame_alg_vol(frames_bgr, frame_idx, bbox_provider, cameras_params, alg_model, vol_model):
     images_list = []
     proj_list = []
+    cameras_batch = []
 
     for cam_idx, cam_name in enumerate(CAMERA_NAMES):
         cam_params = cameras_params[cam_idx]
@@ -466,10 +576,9 @@ def run_frame_alg_only(alg_model, frames_bgr, frame_idx, bbox_provider, cameras_
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
         bbox = bbox_provider.get_bbox(cam_name, frame_idx, img_bgr.shape)
-
         top, left, bottom, right = bbox
-        img_crop = img_rgb[top:bottom, left:right]
 
+        img_crop = img_rgb[top:bottom, left:right]
         if img_crop.size == 0:
             raise RuntimeError(f"Crop vide pour {cam_name} frame {frame_idx}, bbox={bbox}")
 
@@ -479,6 +588,23 @@ def run_frame_alg_only(alg_model, frames_bgr, frame_idx, bbox_provider, cameras_
 
         P = build_proj_matrix(cam_params, bbox=bbox)
 
+        dist = cam_params.get("dist", None)
+        dist = dist.copy() if dist is not None else None
+
+        cam = Camera(
+            cam_params["R"].copy(),
+            cam_params["t"].copy(),
+            cam_params["K"].copy(),
+            dist,
+            cam_params["name"]
+        )
+
+        cam.update_after_crop([left, top, right, bottom])
+        crop_h = bottom - top
+        crop_w = right - left
+        cam.update_after_resize((crop_h, crop_w), IMAGE_SIZE)
+
+        cameras_batch.append([cam])
         images_list.append(tensor)
         proj_list.append(torch.from_numpy(P).float())
 
@@ -487,12 +613,23 @@ def run_frame_alg_only(alg_model, frames_bgr, frame_idx, bbox_provider, cameras_
 
     with torch.no_grad():
         alg_output = alg_model(images, proj_matrices, None)
-        alg_kps = alg_output[0][0].cpu().numpy()
+        alg_kps = alg_output[0][0].cpu().numpy().astype(np.float32)
 
-    return alg_kps
+        fake_batch = {
+            "cameras": cameras_batch,
+            "pred_keypoints_3d": [alg_kps],
+        }
+
+        vol_output = vol_model(images, proj_matrices, fake_batch)
+        vol_kps = vol_output[0][0].cpu().numpy()
+        vol_base_point = vol_output[6][0].cpu().numpy()
+
+    return alg_kps, vol_kps, vol_base_point
 
 
+# =========================
 # CSV OUTPUT
+# =========================
 def keypoints3d_header():
     header = ["frame"]
     for j in range(N_JOINTS):
@@ -501,7 +638,7 @@ def keypoints3d_header():
 
 
 def append_keypoints3d_csv(csv_path, frame_idx, kps):
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    ensure_dir(os.path.dirname(csv_path))
     file_exists = os.path.exists(csv_path)
 
     with open(csv_path, "a", newline="", encoding="utf-8") as f:
@@ -518,7 +655,7 @@ def append_keypoints3d_csv(csv_path, frame_idx, kps):
 
 
 def append_global_keypoints3d_csv(csv_path, test_name, frame_idx, kps):
-    os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+    ensure_dir(os.path.dirname(csv_path))
     file_exists = os.path.exists(csv_path)
 
     with open(csv_path, "a", newline="", encoding="utf-8") as f:
@@ -534,8 +671,10 @@ def append_global_keypoints3d_csv(csv_path, test_name, frame_idx, kps):
         writer.writerow(row)
 
 
+# =========================
 # VISU
-def visualize_3d(kps, frame_idx, output_dir):
+# =========================
+def visualize_3d(kps, frame_idx, output_dir, title_prefix="Pose 3D"):
     fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111, projection="3d")
 
@@ -565,15 +704,17 @@ def visualize_3d(kps, frame_idx, output_dir):
     ax.set_xlabel("X (mm)")
     ax.set_ylabel("Y (mm)")
     ax.set_zlabel("Z (mm)")
-    ax.set_title(f"Pose 3D — frame {frame_idx}")
+    ax.set_title(f"{title_prefix} — frame {frame_idx}")
 
-    os.makedirs(output_dir, exist_ok=True)
+    ensure_dir(output_dir)
     out = os.path.join(output_dir, f"pose3d_{frame_idx:06d}.png")
     plt.savefig(out, dpi=100, bbox_inches="tight")
     plt.close()
 
 
 def visualize_reprojection(kps, frame_idx, frames_bgr, cameras_params, output_dir):
+    ensure_dir(output_dir)
+
     for cam_idx, cam_name in enumerate(CAMERA_NAMES):
         img = frames_bgr[cam_name].copy()
         cam_params = cameras_params[cam_idx]
@@ -618,21 +759,30 @@ def visualize_reprojection(kps, frame_idx, frames_bgr, cameras_params, output_di
             if 0 <= xi < w and 0 <= yi < h and 0 <= xj < w and 0 <= yj < h:
                 cv2.line(img, (xi, yi), (xj, yj), (255, 0, 0), 2)
 
-        os.makedirs(output_dir, exist_ok=True)
         out = os.path.join(output_dir, f"reproj_frame{frame_idx:06d}_{cam_name}.jpg")
         cv2.imwrite(out, img)
 
 
+# =========================
 # PROCESS ONE TEST
-def process_test(test_info, alg_model, global_csv_path):
+# =========================
+def process_test(test_info, alg_model, vol_model, global_alg_csv_path, global_vol_csv_path):
     output_dir = os.path.join(OUTPUT_ROOT, test_info["test_name"])
-    csv_path = os.path.join(output_dir, "keypoints3d.csv")
-    vis3d_dir = os.path.join(output_dir, "vis3d")
-    reproj_dir = os.path.join(output_dir, "reprojection")
 
-    os.makedirs(output_dir, exist_ok=True)
-    os.makedirs(vis3d_dir, exist_ok=True)
-    os.makedirs(reproj_dir, exist_ok=True)
+    alg_csv_path = os.path.join(output_dir, "keypoints3d_alg.csv")
+    vol_csv_path = os.path.join(output_dir, "keypoints3d_vol.csv")
+
+    vis3d_alg_dir = os.path.join(output_dir, "vis3d_alg")
+    vis3d_vol_dir = os.path.join(output_dir, "vis3d_vol")
+
+    reproj_alg_dir = os.path.join(output_dir, "reprojection_alg")
+    reproj_vol_dir = os.path.join(output_dir, "reprojection_vol")
+
+    ensure_dir(output_dir)
+    ensure_dir(vis3d_alg_dir)
+    ensure_dir(vis3d_vol_dir)
+    ensure_dir(reproj_alg_dir)
+    ensure_dir(reproj_vol_dir)
 
     cameras_params = load_cameras_for_test(test_info["xcp_path"])
 
@@ -667,25 +817,48 @@ def process_test(test_info, alg_model, global_csv_path):
             frames_bgr[cam_name] = frame_bgr
 
         try:
-            kps = run_frame_alg_only(
-                alg_model=alg_model,
+            alg_kps, vol_kps, vol_base_point = run_frame_alg_vol(
                 frames_bgr=frames_bgr,
                 frame_idx=frame_idx,
                 bbox_provider=bbox_provider,
                 cameras_params=cameras_params,
+                alg_model=alg_model,
+                vol_model=vol_model,
             )
 
-            append_keypoints3d_csv(csv_path, frame_idx, kps)
-            append_global_keypoints3d_csv(global_csv_path, test_info["test_name"], frame_idx, kps)
+            append_keypoints3d_csv(alg_csv_path, frame_idx, alg_kps)
+            append_keypoints3d_csv(vol_csv_path, frame_idx, vol_kps)
 
-            visualize_3d(kps, frame_idx, vis3d_dir)
-            visualize_reprojection(kps, frame_idx, frames_bgr, cameras_params, reproj_dir)
+            append_global_keypoints3d_csv(global_alg_csv_path, test_info["test_name"], frame_idx, alg_kps)
+            append_global_keypoints3d_csv(global_vol_csv_path, test_info["test_name"], frame_idx, vol_kps)
 
-            print("shape:", kps.shape, "| pelvis:", kps[6].round(1))
+            np.save(os.path.join(output_dir, f"kps3d_{frame_idx:06d}_alg.npy"), alg_kps)
+            np.save(os.path.join(output_dir, f"kps3d_{frame_idx:06d}_vol.npy"), vol_kps)
+
+            visualize_3d(alg_kps, frame_idx, vis3d_alg_dir, title_prefix="Pose 3D ALG")
+            visualize_3d(vol_kps, frame_idx, vis3d_vol_dir, title_prefix="Pose 3D VOL")
+
+            visualize_reprojection(alg_kps, frame_idx, frames_bgr, cameras_params, reproj_alg_dir)
+            visualize_reprojection(vol_kps, frame_idx, frames_bgr, cameras_params, reproj_vol_dir)
+
+            diff = mean_joint_diff(alg_kps, vol_kps)
+            alg_spread = spread_from_pelvis(alg_kps)
+            vol_spread = spread_from_pelvis(vol_kps)
+
+            print("ALG pelvis:", alg_kps[6].round(1))
+            print("VOL pelvis:", vol_kps[6].round(1))
+            print("VOL base point:", vol_base_point.round(1))
+            print(f"||base_point - alg_pelvis|| = {np.linalg.norm(vol_base_point - alg_kps[6]):.2f} mm")
+            print(f"mean joint diff ALG/VOL = {diff:.2f} mm")
+            print("ALG spread from pelvis:", alg_spread.round(1))
+            print("VOL spread from pelvis:", vol_spread.round(1))
+
             ok_count += 1
 
         except Exception as e:
             print(f"Erreur frame {frame_idx}: {e}")
+            import traceback
+            traceback.print_exc()
             err_count += 1
 
     for cap in caps.values():
@@ -697,9 +870,11 @@ def process_test(test_info, alg_model, global_csv_path):
     )
 
 
+# =========================
 # MAIN
+# =========================
 if __name__ == "__main__":
-    os.makedirs(OUTPUT_ROOT, exist_ok=True)
+    ensure_dir(OUTPUT_ROOT)
 
     tests = discover_tests()
     if not tests:
@@ -714,9 +889,18 @@ if __name__ == "__main__":
         )
 
     alg_model = load_alg_model()
-    global_csv_path = os.path.join(OUTPUT_ROOT, "all_tests_keypoints3d.csv")
+    vol_model = load_vol_model()
+
+    global_alg_csv_path = os.path.join(OUTPUT_ROOT, "all_tests_keypoints3d_alg.csv")
+    global_vol_csv_path = os.path.join(OUTPUT_ROOT, "all_tests_keypoints3d_vol.csv")
 
     for test_info in tests:
-        process_test(test_info, alg_model, global_csv_path)
+        process_test(
+            test_info=test_info,
+            alg_model=alg_model,
+            vol_model=vol_model,
+            global_alg_csv_path=global_alg_csv_path,
+            global_vol_csv_path=global_vol_csv_path,
+        )
 
     print(f"\nTous les tests sont terminés -> résultats dans '{OUTPUT_ROOT}'")

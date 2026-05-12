@@ -73,6 +73,17 @@ def build_tracker(cfg: Any) -> MultiViewTracker:
         tracklet_conflict_max_age=cfg.tracklet_conflict_max_age,
         motion_weight=cfg.motion_weight,
         appearance_weight=cfg.appearance_weight,
+        spatial_weight=getattr(cfg, "spatial_weight", 0.35),
+        reprojection_error_threshold=getattr(cfg, "reprojection_error_threshold", 120.0),
+        spatial_consistency_threshold_mm=getattr(cfg, "spatial_consistency_threshold_mm", 1500.0),
+        duplicate_merge_distance_mm=getattr(cfg, "duplicate_merge_distance_mm", 600.0),
+        duplicate_merge_appearance=getattr(cfg, "duplicate_merge_appearance", 0.30),
+        group_safety_merge_distance_mm=getattr(cfg, "group_safety_merge_distance_mm", 400.0),
+        occlusion_xy_distance_mm=getattr(cfg, "occlusion_xy_distance_mm", 900.0),
+        max_occlusion_frames=getattr(cfg, "max_occlusion_frames", 120),
+        reactivation_appearance_threshold=getattr(cfg, "reactivation_appearance_threshold", 0.35),
+        occlusion_reid_threshold_mm=getattr(cfg, "occlusion_reid_threshold_mm", 1200.0),
+        min_visibility_for_new_track=getattr(cfg, "min_visibility_for_new_track", 0.40),
     )
 
 

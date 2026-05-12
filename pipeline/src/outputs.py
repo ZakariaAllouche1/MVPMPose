@@ -371,7 +371,7 @@ def draw_3d_scene_frame(
         axis_limits["z"][1] - axis_limits["z"][0],
     ))
 
-    ax.view_init(elev=10, azim=-90)
+    ax.view_init(elev=18, azim=10)
 
     output_path = (
         output_dir

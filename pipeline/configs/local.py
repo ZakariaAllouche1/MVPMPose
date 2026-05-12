@@ -48,10 +48,22 @@ reid_model_path = models_dir / "reid" / "osnet_ain_x1_0_M.onnx"
 alg_weights_path = models_dir / "triangulation" / "alg_weights.pth"
 vol_weights_path = models_dir / "triangulation" / "best_vol_17_masked.pth"
 
+# Si tu n'as pas déplacé les poids ALG dans models/, utilise plutôt :
+# alg_weights_path = (
+#     project_root
+#     / "data"
+#     / "pretrained"
+#     / "human36m"
+#     / "human36m_alg_10-04-2019"
+#     / "checkpoints"
+#     / "0060"
+#     / "weights.pth"
+# )
+
 
 # Détection
-# On garde un seuil plutôt bas pour ne pas casser les tracks pendant les frames difficiles.
-# La création d'une nouvelle track reste filtrée par min_confidence_for_new_track.
+# Seuil bas pour ne pas casser les tracks pendant les frames difficiles.
+# La création d'une nouvelle track reste filtrée plus bas.
 yolo_confidence = 0.20
 yolo_person_class = 0
 yolo_tracker_config = "bytetrack.yaml"
@@ -102,6 +114,23 @@ occlusion_reid_threshold_mm = 1200.0
 min_visibility_for_new_track = 0.40
 
 
+# Qualité des détections pour le tracking
+min_detection_confidence_for_matching = 0.10
+min_detection_confidence_for_grouping = 0.20
+
+min_detection_confidence_for_new_track_single_view = 0.70
+min_detection_confidence_for_new_track_multiview = 0.55
+
+min_bbox_height_for_new_track = 80
+min_bbox_width_for_new_track = 30
+
+allow_featureless_detection_for_matching = True
+allow_featureless_detection_for_new_track = False
+
+featureless_pair_cost = 0.85
+strong_spatial_score_for_featureless_pair = 0.65
+
+
 # Triangulation apprenable
 image_size = (384, 384)
 
@@ -136,8 +165,11 @@ save_reprojection_images = True
 save_3d_images = True
 save_failure_log = True
 
+# Images debug seulement.
+# Mettre 10 ou 50 si tu ne veux pas générer trop d'images.
 save_reprojection_every = 1
 save_3d_every = 1
+
 
 # Sauvegarde vidéo finale
 save_output_videos = True
@@ -147,6 +179,7 @@ save_output_videos = True
 video_output_size = None
 
 video_output_codec = "mp4v"
+
 
 # Dossiers de sortie
 csv_dir = output_root / "csv"

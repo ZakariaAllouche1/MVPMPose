@@ -9,6 +9,7 @@ from src.detection import MultiCameraDetector, print_detection_summary
 from src.learned_pose import LearnedPoseEstimator
 from src.outputs import (
     ActivityOutputs,
+    ActivityVideoWriters,
     draw_3d_scene_frame,
     draw_reprojection_frame,
 )
@@ -84,6 +85,36 @@ def build_tracker(cfg: Any) -> MultiViewTracker:
         reactivation_appearance_threshold=getattr(cfg, "reactivation_appearance_threshold", 0.35),
         occlusion_reid_threshold_mm=getattr(cfg, "occlusion_reid_threshold_mm", 1200.0),
         min_visibility_for_new_track=getattr(cfg, "min_visibility_for_new_track", 0.40),
+        min_detection_confidence_for_matching=getattr(cfg, "min_detection_confidence_for_matching", 0.10),
+        min_detection_confidence_for_grouping=getattr(cfg, "min_detection_confidence_for_grouping", 0.20),
+        min_detection_confidence_for_new_track_single_view=getattr(
+            cfg,
+            "min_detection_confidence_for_new_track_single_view",
+            0.70,
+        ),
+        min_detection_confidence_for_new_track_multiview=getattr(
+            cfg,
+            "min_detection_confidence_for_new_track_multiview",
+            0.55,
+        ),
+        min_bbox_height_for_new_track=getattr(cfg, "min_bbox_height_for_new_track", 80),
+        min_bbox_width_for_new_track=getattr(cfg, "min_bbox_width_for_new_track", 30),
+        allow_featureless_detection_for_matching=getattr(
+            cfg,
+            "allow_featureless_detection_for_matching",
+            True,
+        ),
+        allow_featureless_detection_for_new_track=getattr(
+            cfg,
+            "allow_featureless_detection_for_new_track",
+            False,
+        ),
+        featureless_pair_cost=getattr(cfg, "featureless_pair_cost", 0.85),
+        strong_spatial_score_for_featureless_pair=getattr(
+            cfg,
+            "strong_spatial_score_for_featureless_pair",
+            0.65,
+        ),
     )
 
 
@@ -235,12 +266,33 @@ def run_activity(
         save_failures=cfg.save_failure_log,
     )
 
+    video_writers = None
+
     try:
         with MultiCameraVideos(
             video_paths_by_camera=activity.video_paths_by_camera,
             camera_names=cfg.camera_names,
         ) as videos:
             videos.print_summary()
+
+            if cfg.save_output_videos:
+                frame_size_by_camera = {
+                    camera_name: (
+                        videos.infos[camera_name].width,
+                        videos.infos[camera_name].height,
+                    )
+                    for camera_name in cfg.camera_names
+                }
+
+                video_writers = ActivityVideoWriters(
+                    activity_name=activity.name,
+                    camera_names=cfg.camera_names,
+                    video_output_dir=cfg.video_output_dir,
+                    fps=videos.fps,
+                    frame_size_by_camera=frame_size_by_camera,
+                    output_size=cfg.video_output_size,
+                    codec=cfg.video_output_codec,
+                )
 
             start_frame, end_frame, stride = get_frame_range(cfg, videos)
 
@@ -319,6 +371,14 @@ def run_activity(
                         output_dir=cfg.vis3d_dir,
                     )
 
+                if video_writers is not None:
+                    video_writers.write_frame(
+                        frame_id=frame_id,
+                        frames_by_camera=frames,
+                        cameras_by_camera=cameras,
+                        tracks=tracker.active_tracks(),
+                    )
+
                 processed_count += 1
 
                 if should_stop_after_count(cfg, processed_count):
@@ -330,6 +390,9 @@ def run_activity(
 
     finally:
         outputs.close()
+
+        if video_writers is not None:
+            video_writers.close()
 
 
 def run_pipeline(cfg: Any) -> None:

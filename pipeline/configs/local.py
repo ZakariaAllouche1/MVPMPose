@@ -10,16 +10,8 @@ subject_name = "METASPORT12"
 
 
 # Dossiers d'entrée et de sortie
-base_videos_dir = (
-    project_root
-    / "metasport"
-    / "DATA"
-    / f"{subject_name}_undistort"
-    / "Session1"
-    / "Files"
-    / "fichiers_video"
-    / "Bruts"
-    / f"{subject_name}_undistorted"
+base_videos_dir = Path(
+    r"\\intram\Paris\Labo\IBHGC\PROJETS\metasport\DATA\METASPORT12_undistort\Session1\Files\fichiers_video\Bruts"
 )
 
 output_root = project_root / "outputs"
@@ -48,30 +40,19 @@ device_id_by_camera = {
 
 
 # Modèles
-yolo_model_path = project_root / "runs" / "detect" / "train" / "weights" / "best.pt"
-reid_model_path = project_root / "pretrained_models" / "osnet_ain_x1_0_M.onnx"
+models_dir = project_root / "models"
 
-alg_weights_path = (
-    project_root
-    / "data"
-    / "pretrained"
-    / "human36m"
-    / "human36m_alg_10-04-2019"
-    / "checkpoints"
-    / "0060"
-    / "weights.pth"
-)
+yolo_model_path = models_dir / "yolo" / "best.pt"
+reid_model_path = models_dir / "reid" / "osnet_ain_x1_0_M.onnx"
 
-vol_weights_path = (
-    project_root
-    / "output_vol_17_masked"
-    / "checkpoints"
-    / "best_vol_17_masked.pth"
-)
+alg_weights_path = models_dir / "triangulation" / "alg_weights.pth"
+vol_weights_path = models_dir / "triangulation" / "best_vol_17_masked.pth"
 
 
 # Détection
-yolo_confidence = 0.35
+# On garde un seuil plutôt bas pour ne pas casser les tracks pendant les frames difficiles.
+# La création d'une nouvelle track reste filtrée par min_confidence_for_new_track.
+yolo_confidence = 0.20
 yolo_person_class = 0
 yolo_tracker_config = "bytetrack.yaml"
 
@@ -87,22 +68,38 @@ reid_bbox_margin_ratio = 0.10
 
 
 # Tracking multi-vues
-track_patience = 150
+track_patience = 200
 min_hits_to_confirm = 3
 
-intra_frame_appearance_threshold = 0.35
-association_threshold = 0.75
+intra_frame_appearance_threshold = 0.40
+association_threshold = 0.85
 
-min_confidence_for_new_track = 0.45
+min_confidence_for_new_track = 0.55
 min_views_for_new_track = 1
 
 feature_gallery_size = 100
 feature_update_weight = 0.05
 
-tracklet_conflict_max_age = 10
+tracklet_conflict_max_age = 15
 
+appearance_weight = 0.50
 motion_weight = 0.30
-appearance_weight = 0.70
+spatial_weight = 0.20
+
+reprojection_error_threshold = 120.0
+spatial_consistency_threshold_mm = 1500.0
+
+duplicate_merge_distance_mm = 600.0
+duplicate_merge_appearance = 0.30
+group_safety_merge_distance_mm = 400.0
+
+occlusion_xy_distance_mm = 900.0
+max_occlusion_frames = 120
+
+reactivation_appearance_threshold = 0.35
+occlusion_reid_threshold_mm = 1200.0
+
+min_visibility_for_new_track = 0.40
 
 
 # Triangulation apprenable

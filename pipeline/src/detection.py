@@ -28,7 +28,6 @@ class ViewDetection:
     pose_2d: Optional[np.ndarray]
     pose_confidence: float
     joint_confidences: Optional[np.ndarray]
-    mask: Optional[np.ndarray] = None
 
     @property
     def bbox_tlbr(self) -> Tuple[int, int, int, int]:
@@ -152,8 +151,6 @@ def get_torso_bbox(
     if pose_2d is None or joint_confidences is None:
         return None
 
-    height, width = image_shape[:2]
-
     torso_indices = [5, 6, 11, 12]
     valid_points = []
 
@@ -262,15 +259,21 @@ class SingleCameraDetector:
             keypoints, scores = self.pose_estimator(frame_bgr)
         except Exception as exc:
             print(f"[detection] RTMLib erreur {self.camera_name}: {exc}")
-            return np.empty((0, 0, 2), dtype=np.float32), np.empty((0, 0), dtype=np.float32)
+            return (
+                np.empty((0, 0, 2), dtype=np.float32),
+                np.empty((0, 0), dtype=np.float32),
+            )
 
         if keypoints is None or len(keypoints) == 0:
-            return np.empty((0, 0, 2), dtype=np.float32), np.empty((0, 0), dtype=np.float32)
+            return (
+                np.empty((0, 0, 2), dtype=np.float32),
+                np.empty((0, 0), dtype=np.float32),
+            )
 
-        keypoints = np.asarray(keypoints, dtype=np.float32)
-        scores = np.asarray(scores, dtype=np.float32)
-
-        return keypoints, scores
+        return (
+            np.asarray(keypoints, dtype=np.float32),
+            np.asarray(scores, dtype=np.float32),
+        )
 
     def detect_yolo(self, frame_bgr: np.ndarray):
         return self.yolo.track(
@@ -439,7 +442,6 @@ class SingleCameraDetector:
                     pose_2d=pose_2d,
                     pose_confidence=pose_confidence,
                     joint_confidences=joint_confidences,
-                    mask=None,
                 )
             )
 

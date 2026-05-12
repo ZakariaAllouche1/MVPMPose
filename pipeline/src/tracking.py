@@ -120,9 +120,6 @@ def bbox_iou(a: BoxXYXY, b: BoxXYXY) -> float:
 def project_points(points_3d: np.ndarray, projection: np.ndarray) -> np.ndarray:
     points_3d = np.asarray(points_3d, dtype=np.float64)
 
-    if points_3d.ndim != 2 or points_3d.shape[1] != 3:
-        raise ValueError(f"points_3d doit avoir shape [N, 3], reçu: {points_3d.shape}")
-
     points_h = np.hstack(
         [points_3d, np.ones((points_3d.shape[0], 1), dtype=np.float64)]
     )
@@ -448,6 +445,20 @@ class DetectionGroup:
             return 0.0
         return float(np.mean([detection.confidence for detection in self.detections]))
 
+    @property
+    def visibility_ratio(self) -> float:
+        ratios = []
+
+        for detection in self.detections:
+            if detection.joint_confidences is None:
+                continue
+            ratios.append(float(np.mean(detection.joint_confidences > 0.25)))
+
+        if not ratios:
+            return 0.0
+
+        return float(np.mean(ratios))
+
     def features(self) -> List[np.ndarray]:
         return [
             detection.feature
@@ -516,6 +527,7 @@ class GlobalTrack:
     is_occluded_by: Optional[int] = None
     occlusion_timer: int = 0
 
+    last_visible_ratio: float = 1.0
     aspect_ratio_history: deque = field(default_factory=lambda: deque(maxlen=5))
     position_3d_history: deque = field(default_factory=lambda: deque(maxlen=50))
     position_variance_history: deque = field(default_factory=lambda: deque(maxlen=20))
@@ -656,8 +668,12 @@ class MultiViewTracker:
         spatial_consistency_threshold_mm: float = 1500.0,
         duplicate_merge_distance_mm: float = 600.0,
         duplicate_merge_appearance: float = 0.30,
-        occlusion_xy_distance_mm: float = 750.0,
-        max_occlusion_frames: int = 100,
+        group_safety_merge_distance_mm: float = 400.0,
+        occlusion_xy_distance_mm: float = 900.0,
+        max_occlusion_frames: int = 120,
+        reactivation_appearance_threshold: float = 0.35,
+        occlusion_reid_threshold_mm: float = 1200.0,
+        min_visibility_for_new_track: float = 0.40,
     ) -> None:
         self.camera_names = list(camera_names)
 
@@ -692,8 +708,12 @@ class MultiViewTracker:
         self.spatial_consistency_threshold_mm = float(spatial_consistency_threshold_mm)
         self.duplicate_merge_distance_mm = float(duplicate_merge_distance_mm)
         self.duplicate_merge_appearance = float(duplicate_merge_appearance)
+        self.group_safety_merge_distance_mm = float(group_safety_merge_distance_mm)
         self.occlusion_xy_distance_mm = float(occlusion_xy_distance_mm)
         self.max_occlusion_frames = int(max_occlusion_frames)
+        self.reactivation_appearance_threshold = float(reactivation_appearance_threshold)
+        self.occlusion_reid_threshold_mm = float(occlusion_reid_threshold_mm)
+        self.min_visibility_for_new_track = float(min_visibility_for_new_track)
 
         self.kf2d = KalmanFilter2D()
 
@@ -862,16 +882,40 @@ class MultiViewTracker:
 
         return float(result[1])
 
+    def detection_pair_cost(
+        self,
+        det_a: ViewDetection,
+        det_b: ViewDetection,
+        cameras_by_camera: Optional[Dict[str, CameraData]],
+    ) -> float:
+        if det_a.camera_name == det_b.camera_name:
+            return large_cost
+
+        if det_a.feature is not None and det_b.feature is not None:
+            app = float(cdist([det_a.feature], [det_b.feature], metric="cosine")[0, 0])
+        else:
+            app = 0.60
+
+        group_a = DetectionGroup([det_a])
+        group_b = DetectionGroup([det_b])
+
+        spatial = self.spatial_consistency_score(
+            group_a,
+            group_b,
+            cameras_by_camera,
+        )
+
+        if spatial > 0:
+            return 0.5 * app + 0.5 * (1.0 - spatial)
+
+        return app
+
     def group_detections(
         self,
         detections_by_camera: Dict[str, List[ViewDetection]],
         cameras_by_camera: Optional[Dict[str, CameraData]],
     ) -> List[DetectionGroup]:
-        detections = [
-            detection
-            for detection in self.all_detections(detections_by_camera)
-            if detection.feature is not None
-        ]
+        detections = self.all_detections(detections_by_camera)
 
         if not detections:
             return []
@@ -881,8 +925,23 @@ class MultiViewTracker:
             for index in range(len(detections))
         }
 
-        features = np.stack([detection.feature for detection in detections], axis=0)
-        appearance_cost = cdist(features, features, metric="cosine")
+        pairwise_cost = np.full(
+            (len(detections), len(detections)),
+            fill_value=large_cost,
+            dtype=np.float32,
+        )
+
+        for i, det_i in enumerate(detections):
+            for j, det_j in enumerate(detections):
+                if i == j:
+                    pairwise_cost[i, j] = 0.0
+                    continue
+
+                pairwise_cost[i, j] = self.detection_pair_cost(
+                    det_i,
+                    det_j,
+                    cameras_by_camera,
+                )
 
         while True:
             best_pair = None
@@ -901,28 +960,18 @@ class MultiViewTracker:
                     if not group_a.camera_set.isdisjoint(group_b.camera_set):
                         continue
 
-                    costs = appearance_cost[np.ix_(clusters[key_a], clusters[key_b])]
+                    costs = pairwise_cost[np.ix_(clusters[key_a], clusters[key_b])]
 
                     if costs.size == 0:
                         continue
 
-                    mean_appearance = float(np.mean(costs))
-                    spatial_score = self.spatial_consistency_score(
-                        group_a,
-                        group_b,
-                        cameras_by_camera,
-                    )
-
-                    if spatial_score > 0:
-                        combined_cost = 0.5 * mean_appearance + 0.5 * (1.0 - spatial_score)
-                    else:
-                        combined_cost = mean_appearance
+                    mean_cost = float(np.mean(costs))
 
                     if (
-                        combined_cost < self.intra_frame_appearance_threshold
-                        and combined_cost < best_cost
+                        mean_cost < self.intra_frame_appearance_threshold
+                        and mean_cost < best_cost
                     ):
-                        best_cost = combined_cost
+                        best_cost = mean_cost
                         best_pair = (key_a, key_b)
 
             if best_pair is None:
@@ -936,6 +985,49 @@ class MultiViewTracker:
             DetectionGroup([detections[index] for index in indices])
             for indices in clusters.values()
         ]
+
+        return self.safety_merge_close_groups(groups, cameras_by_camera)
+
+    def safety_merge_close_groups(
+        self,
+        groups: List[DetectionGroup],
+        cameras_by_camera: Optional[Dict[str, CameraData]],
+    ) -> List[DetectionGroup]:
+        if len(groups) <= 1:
+            return groups
+
+        merged = True
+
+        while merged:
+            merged = False
+            i = 0
+
+            while i < len(groups):
+                j = i + 1
+
+                while j < len(groups):
+                    group_a = groups[i]
+                    group_b = groups[j]
+
+                    if not group_a.camera_set.isdisjoint(group_b.camera_set):
+                        j += 1
+                        continue
+
+                    pos_a = self.triangulate_group(group_a, cameras_by_camera)
+                    pos_b = self.triangulate_group(group_b, cameras_by_camera)
+
+                    if pos_a is not None and pos_b is not None:
+                        distance = np.linalg.norm(pos_a[0] - pos_b[0])
+
+                        if distance < self.group_safety_merge_distance_mm:
+                            groups[i] = DetectionGroup(group_a.detections + group_b.detections)
+                            groups.pop(j)
+                            merged = True
+                            continue
+
+                    j += 1
+
+                i += 1
 
         return groups
 
@@ -958,9 +1050,10 @@ class MultiViewTracker:
         self,
         track: GlobalTrack,
         group: DetectionGroup,
+        gating_multiplier: float,
     ) -> float:
         costs = []
-        gating_threshold = chi2inv95[4] * 3.0
+        gating_threshold = chi2inv95[4] * gating_multiplier
 
         for detection in group.detections:
             camera_name = detection.camera_name
@@ -991,14 +1084,14 @@ class MultiViewTracker:
     def spatial_cost_for_group(
         self,
         track: GlobalTrack,
-        group: DetectionGroup,
         group_3d: Optional[Tuple[np.ndarray, float]],
+        gating_multiplier: float,
     ) -> float:
         if not track.has_3d or group_3d is None:
             return 0.5
 
         point_3d = group_3d[0]
-        gating_threshold = chi2inv95[3] * 3.0
+        gating_threshold = chi2inv95[3] * gating_multiplier
 
         distance = track.kf3d.gating_distance(
             track.mean_3d,
@@ -1010,6 +1103,44 @@ class MultiViewTracker:
             return large_cost
 
         return float(distance / gating_threshold)
+
+    def adaptive_weights(
+        self,
+        track: GlobalTrack,
+        group: DetectionGroup,
+        group_3d_info: Optional[Tuple[np.ndarray, float]],
+    ) -> Tuple[float, float, float, float, float]:
+        group_visibility = group.visibility_ratio
+        num_views = group.num_views
+
+        recent_view_pattern = list(track.multi_view_history)[-5:] if track.multi_view_history else []
+        is_transitioning = len(set(recent_view_pattern)) > 1 if recent_view_pattern else False
+
+        if is_transitioning or track.single_view_streak > 0:
+            if num_views == 1 and track.has_3d:
+                return 0.60, 0.30, 0.10, 0.85, 3.0
+
+            if num_views >= 2 and not track.has_3d:
+                return 0.50, 0.30, 0.20, 0.80, 2.5
+
+            return 0.50, 0.25, 0.25, 0.75, 2.0
+
+        if group_visibility < 0.30:
+            if track.state == TrackState.occluded:
+                return 0.20, 0.30, 0.50, 0.90, 6.0
+
+            return 0.30, 0.20, 0.50, 0.85, 5.0
+
+        if track.state == TrackState.occluded:
+            return 0.10, 0.45, 0.45, 0.95, 10.0
+
+        if track.is_occluded_by is not None or track.time_since_update > 5:
+            return 0.70, 0.15, 0.15, 0.80, 4.0
+
+        if track.has_3d and group_3d_info is not None:
+            return 0.50, 0.10, 0.40, 0.70, 2.0
+
+        return 0.70, 0.30, 0.00, 0.80, 2.0
 
     def recent_tracklet_owner(
         self,
@@ -1035,6 +1166,45 @@ class MultiViewTracker:
             return None
 
         return owner
+
+    def is_same_tracklet_reliable(
+        self,
+        track: GlobalTrack,
+        detection: ViewDetection,
+    ) -> bool:
+        if detection.tracklet_id is None:
+            return False
+
+        camera_name = detection.camera_name
+
+        if track.last_tracklet_id.get(camera_name) != detection.tracklet_id:
+            return False
+
+        if camera_name in track.kf2d_mean_by_camera:
+            pred_bbox = kalman_to_bbox(track.kf2d_mean_by_camera[camera_name])
+            curr_center = bbox_center(detection.bbox_xyxy)
+
+            pred_center = np.array(
+                [
+                    0.5 * (pred_bbox[0] + pred_bbox[2]),
+                    0.5 * (pred_bbox[1] + pred_bbox[3]),
+                ],
+                dtype=np.float64,
+            )
+
+            distance = np.linalg.norm(curr_center - pred_center)
+            max_distance = 120.0 + 25.0 * track.time_since_update
+
+            if distance > max_distance:
+                return False
+
+        if track.feature_gallery and detection.feature is not None:
+            app = track.appearance_distance(detection.feature)
+
+            if app > 0.35:
+                return False
+
+        return True
 
     def has_tracklet_conflict(
         self,
@@ -1071,6 +1241,12 @@ class MultiViewTracker:
             for group in groups
         ]
 
+        track_positions_3d = {
+            track.global_id: track.mean_3d[:3]
+            for track in self.active_tracks()
+            if track.has_3d
+        }
+
         cost_matrix = np.full(
             (len(tracks), len(groups)),
             fill_value=large_cost,
@@ -1079,33 +1255,148 @@ class MultiViewTracker:
 
         for track_index, track in enumerate(tracks):
             for group_index, group in enumerate(groups):
+                group_3d_info = group_3d_infos[group_index]
+                w_app, w_motion, w_spatial, threshold, gating_multiplier = self.adaptive_weights(
+                    track,
+                    group,
+                    group_3d_info,
+                )
+
                 if self.has_tracklet_conflict(track, group):
                     continue
 
-                motion_cost = self.motion_cost_for_group(track, group)
+                motion_cost = self.motion_cost_for_group(
+                    track,
+                    group,
+                    gating_multiplier,
+                )
 
                 if motion_cost >= large_cost:
                     continue
 
                 spatial_cost = self.spatial_cost_for_group(
                     track,
-                    group,
-                    group_3d_infos[group_index],
+                    group_3d_info,
+                    gating_multiplier,
                 )
 
                 if spatial_cost >= large_cost:
                     continue
 
                 total_cost = (
-                    self.appearance_weight * appearance_cost[track_index, group_index]
-                    + self.motion_weight * motion_cost
-                    + self.spatial_weight * spatial_cost
+                    w_app * appearance_cost[track_index, group_index]
+                    + w_motion * motion_cost
+                    + w_spatial * spatial_cost
                 )
 
-                if total_cost <= self.association_threshold:
+                if track.has_3d and group_3d_info is not None:
+                    proximity_penalty = 0.0
+                    group_pos = group_3d_info[0]
+
+                    for other_track_id, other_pos in track_positions_3d.items():
+                        if other_track_id == track.global_id:
+                            continue
+
+                        if np.linalg.norm(track.mean_3d[:3] - other_pos) < 1200.0:
+                            if np.linalg.norm(group_pos - other_pos) < np.linalg.norm(group_pos - track.mean_3d[:3]):
+                                proximity_penalty = max(proximity_penalty, 0.2)
+
+                    total_cost += proximity_penalty
+
+                reliable_tracklets = 0
+
+                for detection in group.detections:
+                    if self.is_same_tracklet_reliable(track, detection):
+                        reliable_tracklets += 1
+
+                if reliable_tracklets > 0:
+                    total_cost *= 0.85
+
+                if total_cost < threshold:
                     cost_matrix[track_index, group_index] = float(total_cost)
 
         return cost_matrix
+
+    def resolve_association_conflicts(
+        self,
+        matches: List[Tuple[int, int]],
+        tracks: List[GlobalTrack],
+        groups: List[DetectionGroup],
+        cost_matrix: np.ndarray,
+        cameras_by_camera: Optional[Dict[str, CameraData]],
+    ) -> List[Tuple[int, int]]:
+        if not matches:
+            return []
+
+        group_positions = {
+            index: self.triangulate_group(group, cameras_by_camera)
+            for index, group in enumerate(groups)
+        }
+
+        invalid = set()
+
+        for i in range(len(matches)):
+            for j in range(i + 1, len(matches)):
+                track_i, group_i = matches[i]
+                track_j, group_j = matches[j]
+
+                if track_i == track_j:
+                    pos_i = group_positions.get(group_i)
+                    pos_j = group_positions.get(group_j)
+
+                    if pos_i is not None and pos_j is not None:
+                        distance = np.linalg.norm(pos_i[0] - pos_j[0])
+
+                        if distance > self.spatial_consistency_threshold_mm:
+                            if cost_matrix[track_i, group_i] > cost_matrix[track_j, group_j]:
+                                invalid.add((track_i, group_i))
+                            else:
+                                invalid.add((track_j, group_j))
+
+                if track_i != track_j:
+                    pos_i = group_positions.get(group_i)
+                    pos_j = group_positions.get(group_j)
+
+                    if pos_i is not None and pos_j is not None:
+                        distance = np.linalg.norm(pos_i[0] - pos_j[0])
+
+                        if distance < 500.0:
+                            if cost_matrix[track_i, group_i] > cost_matrix[track_j, group_j]:
+                                invalid.add((track_i, group_i))
+                            else:
+                                invalid.add((track_j, group_j))
+
+        return [
+            match for match in matches
+            if match not in invalid
+        ]
+
+    def match_subset(
+        self,
+        tracks: List[GlobalTrack],
+        groups: List[DetectionGroup],
+        cameras_by_camera: Optional[Dict[str, CameraData]],
+    ) -> List[Tuple[int, int]]:
+        cost = self.compute_cost_matrix(tracks, groups, cameras_by_camera)
+
+        if cost.size == 0:
+            return []
+
+        rows, cols = linear_sum_assignment(cost)
+
+        matches = []
+
+        for row, col in zip(rows, cols):
+            if cost[row, col] < large_cost:
+                matches.append((int(row), int(col)))
+
+        return self.resolve_association_conflicts(
+            matches,
+            tracks,
+            groups,
+            cost,
+            cameras_by_camera,
+        )
 
     def matching_cascade(
         self,
@@ -1116,89 +1407,139 @@ class MultiViewTracker:
         if not tracks or not groups:
             return [], list(range(len(tracks))), list(range(len(groups)))
 
-        unmatched_track_indices = list(range(len(tracks)))
-        unmatched_group_indices = list(range(len(groups)))
-        matches: List[Tuple[int, int]] = []
+        unmatched_tracks = list(range(len(tracks)))
+        unmatched_groups = list(range(len(groups)))
+        final_matches: List[Tuple[int, int]] = []
 
-        cascade_track_sets = [
-            [
-                index for index in unmatched_track_indices
-                if tracks[index].state == TrackState.confirmed_3d
-                and tracks[index].time_since_update <= 5
-            ],
-            [
-                index for index in unmatched_track_indices
-                if tracks[index].state == TrackState.confirmed_2d
-                and tracks[index].time_since_update <= 5
-            ],
-            [
-                index for index in unmatched_track_indices
-                if tracks[index].state in {TrackState.occluded, TrackState.tentative}
-            ],
+        cascade = []
+
+        transitioning = [
+            index for index in unmatched_tracks
+            if (
+                0 < tracks[index].single_view_streak < 15
+                or (
+                    tracks[index].multi_view_history
+                    and len(set(list(tracks[index].multi_view_history)[-5:])) > 1
+                )
+            )
         ]
+        cascade.append(transitioning)
 
-        for track_indices in cascade_track_sets:
+        confirmed = [
+            index for index in unmatched_tracks
+            if tracks[index].state in {TrackState.confirmed_2d, TrackState.confirmed_3d}
+            and tracks[index].time_since_update < 5
+            and not tracks[index].is_occluded_by
+        ]
+        cascade.append(confirmed)
+
+        uncertain = [
+            index for index in unmatched_tracks
+            if tracks[index].state in {TrackState.occluded, TrackState.tentative}
+        ]
+        cascade.append(uncertain)
+
+        for track_indices in cascade:
             track_indices = [
                 index for index in track_indices
-                if index in unmatched_track_indices
+                if index in unmatched_tracks
             ]
 
-            if not track_indices or not unmatched_group_indices:
+            if not track_indices or not unmatched_groups:
                 continue
 
             selected_tracks = [tracks[index] for index in track_indices]
-            selected_groups = [groups[index] for index in unmatched_group_indices]
+            selected_groups = [groups[index] for index in unmatched_groups]
 
-            cost = self.compute_cost_matrix(
+            local_matches = self.match_subset(
                 selected_tracks,
                 selected_groups,
                 cameras_by_camera,
             )
 
-            if cost.size == 0:
-                continue
+            used_tracks = set()
+            used_groups = set()
 
-            rows, cols = linear_sum_assignment(cost)
+            for local_track, local_group in local_matches:
+                original_track = track_indices[local_track]
+                original_group = unmatched_groups[local_group]
 
-            newly_matched_tracks = set()
-            newly_matched_groups = set()
+                final_matches.append((original_track, original_group))
+                used_tracks.add(original_track)
+                used_groups.add(original_group)
 
-            for row, col in zip(rows, cols):
-                if cost[row, col] >= large_cost:
-                    continue
-
-                original_track_index = track_indices[int(row)]
-                original_group_index = unmatched_group_indices[int(col)]
-
-                matches.append((original_track_index, original_group_index))
-                newly_matched_tracks.add(original_track_index)
-                newly_matched_groups.add(original_group_index)
-
-            unmatched_track_indices = [
-                index for index in unmatched_track_indices
-                if index not in newly_matched_tracks
+            unmatched_tracks = [
+                index for index in unmatched_tracks
+                if index not in used_tracks
             ]
 
-            unmatched_group_indices = [
-                index for index in unmatched_group_indices
-                if index not in newly_matched_groups
+            unmatched_groups = [
+                index for index in unmatched_groups
+                if index not in used_groups
             ]
 
-        return matches, unmatched_track_indices, unmatched_group_indices
+        partial_groups = [
+            group_index for group_index in unmatched_groups
+            if groups[group_index].visibility_ratio < 0.4
+        ]
+
+        if partial_groups and unmatched_tracks:
+            selected_tracks = [tracks[index] for index in unmatched_tracks]
+            selected_groups = [groups[index] for index in partial_groups]
+
+            local_matches = self.match_subset(
+                selected_tracks,
+                selected_groups,
+                cameras_by_camera,
+            )
+
+            used_tracks = set()
+            used_groups = set()
+
+            for local_track, local_group in local_matches:
+                original_track = unmatched_tracks[local_track]
+                original_group = partial_groups[local_group]
+
+                final_matches.append((original_track, original_group))
+                used_tracks.add(original_track)
+                used_groups.add(original_group)
+
+            unmatched_tracks = [
+                index for index in unmatched_tracks
+                if index not in used_tracks
+            ]
+
+            unmatched_groups = [
+                index for index in unmatched_groups
+                if index not in used_groups
+            ]
+
+        return final_matches, unmatched_tracks, unmatched_groups
 
     def handle_view_transition(
         self,
         track: GlobalTrack,
         group: DetectionGroup,
+        frame_id: int,
     ) -> None:
         num_views = group.num_views
-
         track.multi_view_history.append(num_views)
 
-        if num_views == 1:
+        if track.has_3d and num_views == 1:
             track.single_view_streak += 1
-        else:
+
+            if track.covariance_3d is not None:
+                track.covariance_3d *= 1.1
+
+            if track.single_view_streak < 10:
+                track.state = TrackState.confirmed_2d
+
+        elif not track.has_3d and num_views >= 2:
             track.single_view_streak = 0
+
+        elif num_views >= 2:
+            track.single_view_streak = 0
+            track.last_triangulated_frame = frame_id
 
     def update_track_with_group(
         self,
@@ -1207,12 +1548,13 @@ class MultiViewTracker:
         frame_id: int,
         cameras_by_camera: Optional[Dict[str, CameraData]],
     ) -> None:
-        self.handle_view_transition(track, group)
+        self.handle_view_transition(track, group, frame_id)
 
         track.mark_hit(frame_id, self.min_hits_to_confirm)
 
         feature = group.mean_feature()
         track.update_feature(feature, self.feature_update_weight)
+        track.last_visible_ratio = group.visibility_ratio
 
         for detection in group.detections:
             camera_name = detection.camera_name
@@ -1273,16 +1615,78 @@ class MultiViewTracker:
             track.last_triangulated_frame = frame_id
             track.position_3d_history.append(point_3d.copy())
 
+    def try_reactivate_existing_track(
+        self,
+        group: DetectionGroup,
+        frame_id: int,
+        cameras_by_camera: Optional[Dict[str, CameraData]],
+    ) -> Optional[GlobalTrack]:
+        feature = group.mean_feature()
+        group_3d = self.triangulate_group(group, cameras_by_camera)
+
+        candidates = []
+
+        for track in self.active_tracks():
+            if track.time_since_update == 0:
+                continue
+
+            app = track.appearance_distance(feature)
+
+            if app > max(0.5, self.reactivation_appearance_threshold):
+                continue
+
+            if group_3d is not None and track.has_3d:
+                distance_3d = np.linalg.norm(group_3d[0] - track.mean_3d[:3])
+                threshold = self.occlusion_reid_threshold_mm + track.time_since_update * 50.0
+
+                if distance_3d > threshold:
+                    continue
+
+                score = app + distance_3d / threshold
+            else:
+                score = app + 0.5
+
+            candidates.append((score, track))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: item[0])
+        score, track = candidates[0]
+
+        if score < 0.8:
+            self.update_track_with_group(
+                track,
+                group,
+                frame_id,
+                cameras_by_camera,
+            )
+            return track
+
+        return None
+
     def create_track(
         self,
         group: DetectionGroup,
         frame_id: int,
         cameras_by_camera: Optional[Dict[str, CameraData]],
     ) -> Optional[GlobalTrack]:
+        reactivated = self.try_reactivate_existing_track(
+            group,
+            frame_id,
+            cameras_by_camera,
+        )
+
+        if reactivated is not None:
+            return reactivated
+
         if group.mean_confidence < self.min_confidence_for_new_track:
             return None
 
         if group.num_views < self.min_views_for_new_track:
+            return None
+
+        if group.visibility_ratio < self.min_visibility_for_new_track and group.num_views == 1:
             return None
 
         if group.mean_feature() is None:
@@ -1377,7 +1781,11 @@ class MultiViewTracker:
                 if distances.size > 0 and float(np.min(distances)) < self.occlusion_xy_distance_mm:
                     potentially_occluded = True
 
-            if potentially_occluded and track.time_since_update < self.max_occlusion_frames:
+            is_recent_disappearance = track.time_since_update <= 3
+
+            if (
+                potentially_occluded or is_recent_disappearance
+            ) and track.time_since_update < self.max_occlusion_frames:
                 track.state = TrackState.occluded
                 track.time_since_update += 1
 
@@ -1393,6 +1801,9 @@ class MultiViewTracker:
             for track in self.active_tracks()
             if track.has_3d and track.current_bbox
         ]
+
+        for track in confirmed_3d:
+            track.is_occluded_by = None
 
         for i in range(len(confirmed_3d)):
             for j in range(i + 1, len(confirmed_3d)):

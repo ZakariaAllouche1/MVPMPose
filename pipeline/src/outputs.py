@@ -175,7 +175,7 @@ def draw_projected_skeleton(
 ) -> None:
     height, width = image.shape[:2]
 
-    for joint_index, point in enumerate(points_2d):
+    for point in points_2d:
         x, y = point
 
         if not np.isfinite(x) or not np.isfinite(y):
@@ -443,3 +443,237 @@ class ActivityOutputs:
 
         if self.failure_writer is not None:
             self.failure_writer.close()
+
+
+def draw_predicted_3d_position(
+    image: np.ndarray,
+    track: GlobalTrack,
+    camera: CameraData,
+    color: tuple[int, int, int],
+) -> None:
+    if track.mean_3d is None:
+        return
+
+    if track.time_since_update > 30:
+        return
+
+    try:
+        point_3d = track.mean_3d[:3].reshape(1, 3)
+        point_2d = project_points(point_3d, camera.P)[0]
+    except Exception:
+        return
+
+    x, y = point_2d
+
+    if not np.isfinite(x) or not np.isfinite(y):
+        return
+
+    height, width = image.shape[:2]
+
+    x_i = int(round(float(x)))
+    y_i = int(round(float(y)))
+
+    if 0 <= x_i < width and 0 <= y_i < height:
+        cv2.circle(image, (x_i, y_i), 12, color, -1)
+        cv2.putText(
+            image,
+            f"ID {track.global_id}?",
+            (x_i + 15, y_i + 5),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            color,
+            2,
+            cv2.LINE_AA,
+        )
+
+
+def draw_annotated_video_frame(
+    frame_id: int,
+    camera_name: str,
+    frame: np.ndarray,
+    camera: CameraData,
+    tracks: Iterable[GlobalTrack],
+) -> np.ndarray:
+    image = frame.copy()
+
+    cv2.putText(
+        image,
+        f"Frame {frame_id}",
+        (20, 35),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.0,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+
+    for track in tracks:
+        if track.state == TrackState.lost:
+            continue
+
+        color = color_for_id(track.global_id)
+        label = f"ID {track.global_id}"
+
+        if track.state == TrackState.occluded:
+            label += " [occ]"
+        elif track.is_occluded_by is not None:
+            label += f" [occ by {track.is_occluded_by}]"
+
+        if camera_name in track.current_bbox:
+            draw_bbox(
+                image=image,
+                bbox=track.current_bbox[camera_name],
+                color=color,
+                label=label,
+            )
+
+        # Résultat principal : pose Iskakov / volumetric triangulation reprojetée.
+        if has_valid_pose15(track):
+            pose15 = np.asarray(track.current_pose_3d_15, dtype=np.float32)
+
+            try:
+                projected = project_points(pose15, camera.P)
+                draw_projected_skeleton(
+                    image=image,
+                    points_2d=projected,
+                    color=(255, 0, 0),
+                )
+            except Exception:
+                pass
+
+        elif track.state == TrackState.occluded and track.has_3d:
+            draw_predicted_3d_position(
+                image=image,
+                track=track,
+                camera=camera,
+                color=(255, 100, 100),
+            )
+
+    return image
+
+
+def make_video_writer(
+    output_path: str | Path,
+    fps: float,
+    frame_size: tuple[int, int],
+    codec: str = "mp4v",
+) -> tuple[cv2.VideoWriter, Path]:
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    writer = cv2.VideoWriter(
+        str(output_path),
+        cv2.VideoWriter_fourcc(*codec),
+        fps,
+        frame_size,
+    )
+
+    if writer.isOpened():
+        return writer, output_path
+
+    alt_path = output_path.with_name(output_path.stem + "_avc1.mp4")
+    writer = cv2.VideoWriter(
+        str(alt_path),
+        cv2.VideoWriter_fourcc(*"avc1"),
+        fps,
+        frame_size,
+    )
+
+    if writer.isOpened():
+        return writer, alt_path
+
+    alt_path = output_path.with_name(output_path.stem + "_mjpg.avi")
+    writer = cv2.VideoWriter(
+        str(alt_path),
+        cv2.VideoWriter_fourcc(*"MJPG"),
+        fps,
+        frame_size,
+    )
+
+    if writer.isOpened():
+        return writer, alt_path
+
+    raise RuntimeError(f"Impossible de créer VideoWriter pour {output_path}")
+
+
+class ActivityVideoWriters:
+    def __init__(
+        self,
+        activity_name: str,
+        camera_names: list[str],
+        video_output_dir: str | Path,
+        fps: float,
+        frame_size_by_camera: dict[str, tuple[int, int]],
+        output_size: tuple[int, int] | None = None,
+        codec: str = "mp4v",
+    ) -> None:
+        self.activity_name = activity_name
+        self.camera_names = list(camera_names)
+        self.video_output_dir = Path(video_output_dir)
+        self.output_size = output_size
+        self.codec = codec
+
+        self.writers: dict[str, cv2.VideoWriter] = {}
+        self.paths: dict[str, Path] = {}
+
+        for camera_name in self.camera_names:
+            if output_size is None:
+                frame_size = frame_size_by_camera[camera_name]
+            else:
+                frame_size = output_size
+
+            output_path = (
+                self.video_output_dir
+                / f"{activity_name}_{camera_name}_tracked.mp4"
+            )
+
+            writer, actual_path = make_video_writer(
+                output_path=output_path,
+                fps=fps,
+                frame_size=frame_size,
+                codec=codec,
+            )
+
+            self.writers[camera_name] = writer
+            self.paths[camera_name] = actual_path
+
+            print(f"[video] écriture {camera_name}: {actual_path}")
+
+    def write_frame(
+        self,
+        frame_id: int,
+        frames_by_camera: dict[str, np.ndarray],
+        cameras_by_camera: dict[str, CameraData],
+        tracks: Iterable[GlobalTrack],
+    ) -> None:
+        tracks = list(tracks)
+
+        for camera_name in self.camera_names:
+            if camera_name not in frames_by_camera:
+                continue
+
+            if camera_name not in cameras_by_camera:
+                continue
+
+            image = draw_annotated_video_frame(
+                frame_id=frame_id,
+                camera_name=camera_name,
+                frame=frames_by_camera[camera_name],
+                camera=cameras_by_camera[camera_name],
+                tracks=tracks,
+            )
+
+            if self.output_size is not None:
+                image = cv2.resize(
+                    image,
+                    self.output_size,
+                    interpolation=cv2.INTER_AREA,
+                )
+
+            self.writers[camera_name].write(image)
+
+    def close(self) -> None:
+        for writer in self.writers.values():
+            writer.release()
+
+        self.writers.clear()

@@ -136,9 +136,17 @@ save_reprojection_images = True
 save_3d_images = True
 save_failure_log = True
 
-save_reprojection_every = 10
-save_3d_every = 10
+save_reprojection_every = 1
+save_3d_every = 1
 
+# Sauvegarde vidéo finale
+save_output_videos = True
+
+# None garde la taille originale des vidéos.
+# Exemple possible : (1280, 720)
+video_output_size = None
+
+video_output_codec = "mp4v"
 
 # Dossiers de sortie
 csv_dir = output_root / "csv"

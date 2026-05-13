@@ -729,8 +729,12 @@ class MultiViewTracker:
 
         self.min_detection_confidence_for_matching = float(min_detection_confidence_for_matching)
         self.min_detection_confidence_for_grouping = float(min_detection_confidence_for_grouping)
-        self.min_detection_confidence_for_new_track_single_view = float(min_detection_confidence_for_new_track_single_view)
-        self.min_detection_confidence_for_new_track_multiview = float(min_detection_confidence_for_new_track_multiview)
+        self.min_detection_confidence_for_new_track_single_view = float(
+            min_detection_confidence_for_new_track_single_view
+        )
+        self.min_detection_confidence_for_new_track_multiview = float(
+            min_detection_confidence_for_new_track_multiview
+        )
 
         self.min_bbox_height_for_new_track = int(min_bbox_height_for_new_track)
         self.min_bbox_width_for_new_track = int(min_bbox_width_for_new_track)
@@ -1747,6 +1751,91 @@ class MultiViewTracker:
                 track.last_triangulated_frame = frame_id
                 track.position_3d_history.append(point_3d.copy())
 
+    def try_reassociate_single_view_group(
+        self,
+        group: DetectionGroup,
+        frame_id: int,
+        cameras_by_camera: Optional[Dict[str, CameraData]],
+    ) -> Optional[GlobalTrack]:
+        if group.num_views != 1:
+            return None
+
+        detection = group.detections[0]
+        camera_name = detection.camera_name
+
+        if detection.confidence < self.min_detection_confidence_for_matching:
+            return None
+
+        candidates = []
+
+        for track in self.active_tracks():
+            if track.time_since_update == 0:
+                continue
+
+            if camera_name not in track.kf2d_mean_by_camera:
+                continue
+
+            measurement = bbox_to_kalman(detection.bbox_xyxy)
+            mean = track.kf2d_mean_by_camera[camera_name]
+            covariance = track.kf2d_cov_by_camera[camera_name]
+
+            maha = self.kf2d.gating_distance(
+                mean,
+                covariance,
+                np.asarray([measurement]),
+            )[0]
+
+            gating_multiplier = 4.0 + 0.5 * min(track.time_since_update, 10)
+            gating_threshold = chi2inv95[4] * gating_multiplier
+
+            if maha > gating_threshold:
+                continue
+
+            motion_score = float(maha / gating_threshold)
+
+            app_score = 0.5
+            if detection.feature is not None and track.feature_gallery:
+                app_score = track.appearance_distance(detection.feature)
+
+            tracklet_bonus = 0.0
+            if self.is_same_tracklet_reliable(track, detection):
+                tracklet_bonus = -0.35
+
+            if detection.feature is None and tracklet_bonus >= 0:
+                if motion_score > 0.35:
+                    continue
+
+            if detection.feature is not None and app_score > 0.55 and tracklet_bonus >= 0:
+                continue
+
+            score = 0.60 * motion_score + 0.40 * app_score + tracklet_bonus
+            candidates.append((score, track))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda item: item[0])
+        best_score, best_track = candidates[0]
+
+        if best_score > 0.85:
+            return None
+
+        self.update_track_with_group(
+            best_track,
+            group,
+            frame_id,
+            cameras_by_camera,
+        )
+
+        print(
+            f"[tracking] réassociation mono-vue "
+            f"track={best_track.global_id} "
+            f"cam={camera_name} "
+            f"score={best_score:.3f}"
+        )
+
+        return best_track
+
     def try_reactivate_existing_track(
         self,
         group: DetectionGroup,
@@ -1765,17 +1854,17 @@ class MultiViewTracker:
             if track.time_since_update == 0:
                 continue
 
-            app = track.appearance_distance(feature)
-
-            if app > max(0.5, self.reactivation_appearance_threshold):
-                continue
-
             tracklet_bonus = 0.0
 
             for detection in group.detections:
                 if self.is_same_tracklet_reliable(track, detection):
                     tracklet_bonus = -0.25
                     break
+
+            app = track.appearance_distance(feature)
+
+            if feature is not None and app > max(0.5, self.reactivation_appearance_threshold) and tracklet_bonus >= 0:
+                continue
 
             if group_3d is not None and track.has_3d:
                 distance_3d = np.linalg.norm(group_3d[0] - track.mean_3d[:3])
@@ -1817,6 +1906,15 @@ class MultiViewTracker:
         frame_id: int,
         cameras_by_camera: Optional[Dict[str, CameraData]],
     ) -> Optional[GlobalTrack]:
+        reassociated = self.try_reassociate_single_view_group(
+            group,
+            frame_id,
+            cameras_by_camera,
+        )
+
+        if reassociated is not None:
+            return reassociated
+
         reactivated = self.try_reactivate_existing_track(
             group,
             frame_id,
@@ -1875,7 +1973,6 @@ class MultiViewTracker:
         )
 
         track.feature_gallery = deque(maxlen=self.feature_gallery_size)
-
         self.tracks[global_id] = track
 
         self.update_track_with_group(
@@ -2079,9 +2176,6 @@ class MultiViewTracker:
                         )
                     else:
                         to_delete.append(global_id)
-
-            if track.time_since_update > 50 and track.state != TrackState.lost:
-                track.state = TrackState.lost
 
         for global_id in to_delete:
             if global_id in self.tracks:

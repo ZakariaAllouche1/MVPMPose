@@ -37,6 +37,10 @@ def has_valid_pose15(track: GlobalTrack) -> bool:
     return pose.shape == (15, 3) and np.isfinite(pose).all()
 
 
+def track_visible_in_camera(track: GlobalTrack, camera_name: str) -> bool:
+    return camera_name in track.current_bbox
+
+
 def valid_pose_tracks(tracks: Iterable[GlobalTrack]) -> List[GlobalTrack]:
     return [
         track
@@ -230,16 +234,18 @@ def draw_reprojection_frame(
             if track.state == TrackState.lost:
                 continue
 
+            if not track_visible_in_camera(track, camera_name):
+                continue
+
             color = color_for_id(track.global_id)
             label = f"ID {track.global_id}"
 
-            if camera_name in track.current_bbox:
-                draw_bbox(
-                    image=image,
-                    bbox=track.current_bbox[camera_name],
-                    color=color,
-                    label=label,
-                )
+            draw_bbox(
+                image=image,
+                bbox=track.current_bbox[camera_name],
+                color=color,
+                label=label,
+            )
 
             if has_valid_pose15(track):
                 pose15 = np.asarray(track.current_pose_3d_15, dtype=np.float32)
@@ -371,7 +377,7 @@ def draw_3d_scene_frame(
         axis_limits["z"][1] - axis_limits["z"][0],
     ))
 
-    ax.view_init(elev=18, azim=10)
+    ax.view_init(elev=10, azim=-90)
 
     output_path = (
         output_dir
@@ -445,48 +451,6 @@ class ActivityOutputs:
             self.failure_writer.close()
 
 
-def draw_predicted_3d_position(
-    image: np.ndarray,
-    track: GlobalTrack,
-    camera: CameraData,
-    color: tuple[int, int, int],
-) -> None:
-    if track.mean_3d is None:
-        return
-
-    if track.time_since_update > 30:
-        return
-
-    try:
-        point_3d = track.mean_3d[:3].reshape(1, 3)
-        point_2d = project_points(point_3d, camera.P)[0]
-    except Exception:
-        return
-
-    x, y = point_2d
-
-    if not np.isfinite(x) or not np.isfinite(y):
-        return
-
-    height, width = image.shape[:2]
-
-    x_i = int(round(float(x)))
-    y_i = int(round(float(y)))
-
-    if 0 <= x_i < width and 0 <= y_i < height:
-        cv2.circle(image, (x_i, y_i), 12, color, -1)
-        cv2.putText(
-            image,
-            f"ID {track.global_id}?",
-            (x_i + 15, y_i + 5),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            color,
-            2,
-            cv2.LINE_AA,
-        )
-
-
 def draw_annotated_video_frame(
     frame_id: int,
     camera_name: str,
@@ -511,6 +475,9 @@ def draw_annotated_video_frame(
         if track.state == TrackState.lost:
             continue
 
+        if not track_visible_in_camera(track, camera_name):
+            continue
+
         color = color_for_id(track.global_id)
         label = f"ID {track.global_id}"
 
@@ -519,15 +486,13 @@ def draw_annotated_video_frame(
         elif track.is_occluded_by is not None:
             label += f" [occ by {track.is_occluded_by}]"
 
-        if camera_name in track.current_bbox:
-            draw_bbox(
-                image=image,
-                bbox=track.current_bbox[camera_name],
-                color=color,
-                label=label,
-            )
+        draw_bbox(
+            image=image,
+            bbox=track.current_bbox[camera_name],
+            color=color,
+            label=label,
+        )
 
-        # Résultat principal : pose Iskakov / volumetric triangulation reprojetée.
         if has_valid_pose15(track):
             pose15 = np.asarray(track.current_pose_3d_15, dtype=np.float32)
 
@@ -540,14 +505,6 @@ def draw_annotated_video_frame(
                 )
             except Exception:
                 pass
-
-        elif track.state == TrackState.occluded and track.has_3d:
-            draw_predicted_3d_position(
-                image=image,
-                track=track,
-                camera=camera,
-                color=(255, 100, 100),
-            )
 
     return image
 

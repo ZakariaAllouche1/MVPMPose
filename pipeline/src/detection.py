@@ -29,10 +29,7 @@ class ViewDetection:
     pose_confidence: float
     joint_confidences: Optional[np.ndarray]
 
-    # Qualité géométrique de la bbox dans l'image.
-    # Ces champs servent surtout à décider si une vue est assez fiable pour la
-    # pose 3D learned. Une détection non fiable peut rester utilisée pour le
-    # tracking 2D/global_id, mais elle ne doit pas forcément partir vers la 3D.
+    # Qualité géométrique de la bbox dans l'image
     image_width: int = 0
     image_height: int = 0
     bbox_width_ratio: float = 0.0
@@ -45,9 +42,6 @@ class ViewDetection:
     reliable_for_3d: bool = False
     unreliable_reason: str = ""
 
-    # Complétude du corps estimée depuis les keypoints.
-    # Une personne peut ne pas toucher le bord de l'image mais être quand même
-    # partiellement visible si la bbox YOLO couvre uniquement la partie visible.
     body_completeness_score: float = 0.0
     partial_body: bool = False
     upper_body_visible: bool = False
@@ -253,11 +247,6 @@ def compute_bbox_image_quality(
     border_margin_px: int = 8,
 ) -> Dict[str, object]:
     """Calcule des indicateurs simples de tronquage/échelle bbox.
-
-    Une bbox qui touche un bord peut être une vraie personne mais une mauvaise
-    vue pour la reconstruction 3D, surtout si elle est coupée latéralement ou
-    en haut. Le bas est traité un peu plus souplement car beaucoup de vidéos
-    ont les pieds près du bord inférieur.
     """
     height, width = image_shape[:2]
     x1, y1, x2, y2 = bbox
@@ -310,16 +299,6 @@ def compute_body_completeness(
     min_joint_confidence: float = 0.25,
 ) -> Dict[str, object]:
     """Estime si le corps est suffisamment complet pour une reconstruction 3D.
-
-    Le but n'est pas de supprimer la détection : une personne partielle reste
-    utilisable pour le tracking 2D. En revanche, pour la 3D, une bbox qui ne
-    contient qu'un morceau du corps donne souvent un centre 2D et un crop
-    incohérents.
-
-    Indices supposés COCO/Halpe compatibles pour les 17 premiers points :
-    tête 0-4, épaules 5-6, bras 7-10, hanches 11-12, jambes 13-16. Les modèles
-    RTMLib utilisés ici ajoutent parfois des points de pieds après 17 ; ils ne
-    sont pas nécessaires pour ce score.
     """
     if joint_confidences is None or len(joint_confidences) == 0:
         return {
@@ -363,7 +342,7 @@ def compute_body_completeness(
     completeness = float(np.mean(score_parts))
 
     # Une vue est considérée partielle si le torse manque, si le haut/bas du
-    # corps est absent, ou si la complétude globale est trop faible.
+    # corps est absent, ou si la complétude globale est trop faible
     partial_body = bool(
         not torso_visible
         or not upper_body_visible
@@ -392,10 +371,6 @@ def estimate_view_reliability_for_3d(
     min_pose_confidence: float = 0.20,
 ) -> Dict[str, object]:
     """Estime si une vue peut être utilisée pour la pose 3D learned.
-
-    Important : une vue non fiable reste disponible pour le tracking. On évite
-    seulement de l'utiliser comme crop 3D quand la personne est coupée, au bord
-    de l'image ou avec trop peu de keypoints fiables.
     """
     quality = compute_bbox_image_quality(bbox, image_shape)
     valid_joint_count, valid_joint_ratio = compute_joint_visibility(
@@ -414,8 +389,6 @@ def estimate_view_reliability_for_3d(
     touches_top = bool(quality["touches_top"])
     touches_bottom = bool(quality["touches_bottom"])
 
-    # Coupure latérale/haut = très risqué pour la 3D.
-    # Coupure bas = risqué surtout si peu d'articulations sont visibles.
     edge_truncated = bool(
         touches_left
         or touches_right
@@ -501,9 +474,7 @@ def detection_iou(a: ViewDetection, b: ViewDetection) -> float:
 
 
 def detection_containment(a: ViewDetection, b: ViewDetection) -> float:
-    """
-    Fraction de la plus petite bbox contenue dans l'intersection.
-    Utile pour détecter une bbox partielle incluse dans une bbox complète.
+    """pour détecter une bbox partielle incluse dans une bbox complète.
     """
     inter = detection_intersection_area(a, b)
 
@@ -574,8 +545,8 @@ def pose_centers_are_clearly_different(
     threshold_ratio: float = 0.35,
 ) -> bool:
     """
-    True si les poses suggèrent clairement deux personnes différentes.
-    Dans ce cas, même avec beaucoup d'overlap, on garde les deux bbox.
+    True si les poses suggèrent clairement deux personnes différentes
+    Dans ce cas, même avec beaucoup d'overlap, on garde les deux bbox
     """
     center_a = detection_valid_pose_center(a)
     center_b = detection_valid_pose_center(b)
@@ -639,56 +610,33 @@ def should_suppress_as_duplicate(
     """
     Retourne True seulement si a et b sont très probablement deux bbox
     de la même personne dans la même caméra.
-
-    Correction importante : les doublons ultra-identiques YOLO/ByteTrack
-    doivent être supprimés AVANT les tests ReID/pose. Sur nos CSV, ces
-    doublons avaient parfois un ReID instable ou une pose légèrement différente,
-    alors qu'ils étaient pixel par pixel la même bbox.
-
-    Pour ne pas supprimer une vraie personne derrière une autre, cette règle
-    ultra-stricte exige à la fois : IoU très haut, centres quasi identiques et
-    tailles quasi identiques. L'overlap seul ne suffit toujours pas.
     """
     iou = detection_iou(a, b)
     containment = detection_containment(a, b)
     center_ratio = detection_center_distance_ratio(a, b)
     size_similarity = detection_size_similarity(a, b)
 
-    # Cas le plus important observé dans les CSV : deux bbox quasi identiques
-    # sur la même personne. On supprime même si ReID/pose sont bruités.
     if iou >= 0.92 and center_ratio <= 0.08 and size_similarity >= 0.88:
         return True
 
-    # Variante un peu moins stricte pour les bbox avec IoU ~0.85 mais centre et
-    # taille quasiment identiques. Cela couvre les frames où une bbox est juste
-    # légèrement plus étroite, sans toucher les vraies personnes superposées.
     if iou >= 0.84 and center_ratio <= 0.05 and size_similarity >= 0.82:
         return True
 
     appearance_distance = cosine_distance_optional(a.feature, b.feature)
 
-    # Si les poses ont deux centres clairement différents, ce sont probablement
-    # deux personnes différentes, même si les bbox se chevauchent.
     if pose_centers_are_clearly_different(a, b):
         return False
 
-    # Si le ReID est disponible et dit clairement différent, on garde les deux.
     if appearance_distance is not None and appearance_distance > 0.30:
         return False
 
-    # Cas très sûr : presque exactement la même bbox.
     if iou >= 0.85 and center_ratio <= 0.15 and size_similarity >= 0.75:
         return True
 
-    # Cas bbox partielle + bbox complète :
-    # on supprime seulement si la zone est très contenue ET si ReID/position
-    # suggèrent fortement que c'est le même humain.
     if containment >= 0.88 and center_ratio <= 0.25:
         if appearance_distance is not None and appearance_distance < 0.18:
             return True
 
-        # Sans ReID, on est extrêmement conservateur pour ne pas supprimer
-        # une personne derrière une autre.
         if appearance_distance is None and containment >= 0.96 and center_ratio <= 0.15:
             return True
 
@@ -700,11 +648,9 @@ def suppress_duplicate_detections_same_camera(
 ) -> List[ViewDetection]:
     """
     Supprime les doublons intra-caméra du type :
-    - grande bbox corps complet
-    - petite bbox partielle sur la même personne
+      grande bbox corps complet
+      petite bbox partielle sur la même personne
 
-    La fonction est volontairement conservatrice : quand il peut s'agir d'une
-    personne derrière une autre, elle garde les deux bbox.
     """
     if len(detections) <= 1:
         return detections
@@ -734,8 +680,6 @@ def suppress_duplicate_detections_same_camera(
             area_i = detection_bbox_area(det_i)
             area_j = detection_bbox_area(det_j)
 
-            # Si la qualité est proche, garder la bbox la plus grande.
-            # Sinon garder celle qui a clairement la meilleure qualité.
             if abs(score_i - score_j) < 0.20:
                 keep_i = area_i >= area_j
             else:
@@ -905,7 +849,6 @@ class SingleCameraDetector:
         return crop
 
     def process(self, frame_bgr: np.ndarray) -> List[ViewDetection]:
-        # Reset debug info for this frame/camera.
         self.last_raw_yolo_debug = []
         self.last_detection_counts = {
             "raw_yolo": 0,

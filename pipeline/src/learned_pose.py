@@ -16,15 +16,15 @@ from mvn.models.triangulation import (
 
 from src.cameras import CameraData
 from src.geometry import BoxXYXY, PreparedView, prepare_views_for_track
-from src.joints import get_root_position_15, model17_to_15_numpy
+from src.joints import get_root_position_18, model19_to_18_numpy
 
 
 @dataclass
 class LearnedPoseResult:
     person_id: int
     views_used: List[str]
-    keypoints17: np.ndarray
-    keypoints15: np.ndarray
+    keypoints19: np.ndarray
+    keypoints18: np.ndarray
     root_position: np.ndarray
     score: float
 
@@ -97,8 +97,8 @@ def image_bgr_to_tensor(image_bgr: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(image)
 
 
-def try_extract_confidences(model_output: Any, pred17: torch.Tensor) -> torch.Tensor:
-    batch_size, n_joints, _ = pred17.shape
+def try_extract_confidences(model_output: Any, pred19: torch.Tensor) -> torch.Tensor:
+    batch_size, n_joints, _ = pred19.shape
 
     if isinstance(model_output, (tuple, list)):
         for item in model_output[1:]:
@@ -131,17 +131,17 @@ def try_extract_confidences(model_output: Any, pred17: torch.Tensor) -> torch.Te
     return torch.ones(
         (batch_size, n_joints),
         dtype=torch.float32,
-        device=pred17.device,
+        device=pred19.device,
     )
 
 
 def make_pred_keypoints_3d_list(
-    pred17: torch.Tensor,
+    pred19: torch.Tensor,
     alg_output: Any,
 ) -> List[np.ndarray]:
-    confidences = try_extract_confidences(alg_output, pred17)
+    confidences = try_extract_confidences(alg_output, pred19)
 
-    pred_np = pred17.detach().cpu().numpy().astype(np.float32)
+    pred_np = pred19.detach().cpu().numpy().astype(np.float32)
     conf_np = confidences.detach().cpu().numpy().astype(np.float32)
 
     output: List[np.ndarray] = []
@@ -360,14 +360,14 @@ class LearnedPoseEstimator:
         )
 
         alg_output = self.alg_model(images, projections, None)
-        alg_pred17 = extract_pred_3d(alg_output)
+        alg_pred19 = extract_pred_3d(alg_output)
 
-        if alg_pred17.shape[-2:] != (17, 3):
+        if alg_pred19.shape[-2:] != (self.n_model_joints, 3):
             raise ValueError(
-                f"Sortie ALG inattendue: {tuple(alg_pred17.shape)}"
+                f"Sortie ALG inattendue: {tuple(alg_pred19.shape)} ; attendu [..., {self.n_model_joints}, 3]"
             )
 
-        pred_keypoints_3d = make_pred_keypoints_3d_list(alg_pred17, alg_output)
+        pred_keypoints_3d = make_pred_keypoints_3d_list(alg_pred19, alg_output)
 
         vol_batch = {
             "cameras": cameras_batch,
@@ -375,51 +375,51 @@ class LearnedPoseEstimator:
         }
 
         vol_output = self.vol_model(images, projections, vol_batch)
-        vol_pred17 = extract_pred_3d(vol_output)
+        vol_pred19 = extract_pred_3d(vol_output)
 
-        if vol_pred17.shape[-2:] != (17, 3):
+        if vol_pred19.shape[-2:] != (self.n_model_joints, 3):
             raise ValueError(
-                f"Sortie VOL inattendue: {tuple(vol_pred17.shape)}"
+                f"Sortie VOL inattendue: {tuple(vol_pred19.shape)} ; attendu [..., {self.n_model_joints}, 3]"
             )
 
-        if not torch.isfinite(vol_pred17).all():
+        if not torch.isfinite(vol_pred19).all():
             return None
 
-        keypoints17 = vol_pred17[0].detach().cpu().numpy().astype(np.float32)
-        keypoints15 = model17_to_15_numpy(keypoints17)
-        root_position = get_root_position_15(keypoints15)
+        keypoints19 = vol_pred19[0].detach().cpu().numpy().astype(np.float32)
+        keypoints18 = model19_to_18_numpy(keypoints19)
+        root_position = get_root_position_18(keypoints18)
 
         score = self.estimate_score(
-            keypoints17=keypoints17,
-            keypoints15=keypoints15,
+            keypoints19=keypoints19,
+            keypoints18=keypoints18,
             views_used=views_used,
         )
 
         return LearnedPoseResult(
             person_id=person_id,
             views_used=views_used,
-            keypoints17=keypoints17,
-            keypoints15=keypoints15,
+            keypoints19=keypoints19,
+            keypoints18=keypoints18,
             root_position=root_position,
             score=score,
         )
 
     def estimate_score(
         self,
-        keypoints17: np.ndarray,
-        keypoints15: np.ndarray,
+        keypoints19: np.ndarray,
+        keypoints18: np.ndarray,
         views_used: List[str],
     ) -> float:
-        if not np.isfinite(keypoints17).all():
+        if not np.isfinite(keypoints19).all():
             return 0.0
 
-        if not np.isfinite(keypoints15).all():
+        if not np.isfinite(keypoints18).all():
             return 0.0
 
         view_score = min(1.0, len(views_used) / 4.0)
 
         spread = np.linalg.norm(
-            keypoints15 - keypoints15[2:3],
+            keypoints18 - keypoints18[2:3],
             axis=1,
         )
 

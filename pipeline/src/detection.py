@@ -29,6 +29,31 @@ class ViewDetection:
     pose_confidence: float
     joint_confidences: Optional[np.ndarray]
 
+    # Qualité géométrique de la bbox dans l'image.
+    # Ces champs servent surtout à décider si une vue est assez fiable pour la
+    # pose 3D learned. Une détection non fiable peut rester utilisée pour le
+    # tracking 2D/global_id, mais elle ne doit pas forcément partir vers la 3D.
+    image_width: int = 0
+    image_height: int = 0
+    bbox_width_ratio: float = 0.0
+    bbox_height_ratio: float = 0.0
+    bbox_area_ratio: float = 0.0
+    touches_border: bool = False
+    edge_truncated: bool = False
+    valid_joint_count: int = 0
+    valid_joint_ratio: float = 0.0
+    reliable_for_3d: bool = False
+    unreliable_reason: str = ""
+
+    # Complétude du corps estimée depuis les keypoints.
+    # Une personne peut ne pas toucher le bord de l'image mais être quand même
+    # partiellement visible si la bbox YOLO couvre uniquement la partie visible.
+    body_completeness_score: float = 0.0
+    partial_body: bool = False
+    upper_body_visible: bool = False
+    lower_body_visible: bool = False
+    torso_visible: bool = False
+
     @property
     def bbox_tlbr(self) -> Tuple[int, int, int, int]:
         x1, y1, x2, y2 = self.bbox_xyxy
@@ -222,6 +247,513 @@ def crop_image(image_bgr: np.ndarray, bbox: BoxXYXY) -> np.ndarray:
     return image_bgr[y1:y2, x1:x2].copy()
 
 
+def compute_bbox_image_quality(
+    bbox: BoxXYXY,
+    image_shape: Tuple[int, int, int],
+    border_margin_px: int = 8,
+) -> Dict[str, object]:
+    """Calcule des indicateurs simples de tronquage/échelle bbox.
+
+    Une bbox qui touche un bord peut être une vraie personne mais une mauvaise
+    vue pour la reconstruction 3D, surtout si elle est coupée latéralement ou
+    en haut. Le bas est traité un peu plus souplement car beaucoup de vidéos
+    ont les pieds près du bord inférieur.
+    """
+    height, width = image_shape[:2]
+    x1, y1, x2, y2 = bbox
+
+    box_w = max(1.0, float(x2 - x1))
+    box_h = max(1.0, float(y2 - y1))
+
+    touches_left = x1 <= border_margin_px
+    touches_top = y1 <= border_margin_px
+    touches_right = x2 >= width - border_margin_px
+    touches_bottom = y2 >= height - border_margin_px
+
+    touches_border = bool(touches_left or touches_top or touches_right or touches_bottom)
+
+    return {
+        "image_width": int(width),
+        "image_height": int(height),
+        "bbox_width_ratio": float(box_w / max(1.0, float(width))),
+        "bbox_height_ratio": float(box_h / max(1.0, float(height))),
+        "bbox_area_ratio": float((box_w * box_h) / max(1.0, float(width * height))),
+        "touches_left": bool(touches_left),
+        "touches_top": bool(touches_top),
+        "touches_right": bool(touches_right),
+        "touches_bottom": bool(touches_bottom),
+        "touches_border": touches_border,
+    }
+
+
+def compute_joint_visibility(
+    joint_confidences: Optional[np.ndarray],
+    min_joint_confidence: float = 0.25,
+) -> tuple[int, float]:
+    if joint_confidences is None or len(joint_confidences) == 0:
+        return 0, 0.0
+
+    scores = np.asarray(joint_confidences, dtype=np.float32)
+    finite = np.isfinite(scores)
+
+    if not np.any(finite):
+        return 0, 0.0
+
+    valid = finite & (scores > float(min_joint_confidence))
+    return int(np.sum(valid)), float(np.sum(valid) / max(1, len(scores)))
+
+
+
+
+def compute_body_completeness(
+    joint_confidences: Optional[np.ndarray],
+    min_joint_confidence: float = 0.25,
+) -> Dict[str, object]:
+    """Estime si le corps est suffisamment complet pour une reconstruction 3D.
+
+    Le but n'est pas de supprimer la détection : une personne partielle reste
+    utilisable pour le tracking 2D. En revanche, pour la 3D, une bbox qui ne
+    contient qu'un morceau du corps donne souvent un centre 2D et un crop
+    incohérents.
+
+    Indices supposés COCO/Halpe compatibles pour les 17 premiers points :
+    tête 0-4, épaules 5-6, bras 7-10, hanches 11-12, jambes 13-16. Les modèles
+    RTMLib utilisés ici ajoutent parfois des points de pieds après 17 ; ils ne
+    sont pas nécessaires pour ce score.
+    """
+    if joint_confidences is None or len(joint_confidences) == 0:
+        return {
+            "body_completeness_score": 0.0,
+            "partial_body": True,
+            "upper_body_visible": False,
+            "lower_body_visible": False,
+            "torso_visible": False,
+        }
+
+    scores = np.asarray(joint_confidences, dtype=np.float32)
+
+    def count_valid(indices: List[int]) -> int:
+        count = 0
+        for index in indices:
+            if index >= len(scores):
+                continue
+            value = float(scores[index])
+            if np.isfinite(value) and value > float(min_joint_confidence):
+                count += 1
+        return count
+
+    head = count_valid([0, 1, 2, 3, 4])
+    shoulders = count_valid([5, 6])
+    arms = count_valid([7, 8, 9, 10])
+    hips = count_valid([11, 12])
+    legs = count_valid([13, 14, 15, 16])
+
+    torso_visible = shoulders >= 1 and hips >= 1
+    upper_body_visible = shoulders >= 1 and (head >= 1 or arms >= 1)
+    lower_body_visible = hips >= 1 and legs >= 2
+
+    score_parts = [
+        1.0 if torso_visible else 0.0,
+        min(1.0, head / 2.0),
+        min(1.0, shoulders / 2.0),
+        min(1.0, arms / 2.0),
+        min(1.0, hips / 2.0),
+        min(1.0, legs / 2.0),
+    ]
+    completeness = float(np.mean(score_parts))
+
+    # Une vue est considérée partielle si le torse manque, si le haut/bas du
+    # corps est absent, ou si la complétude globale est trop faible.
+    partial_body = bool(
+        not torso_visible
+        or not upper_body_visible
+        or not lower_body_visible
+        or completeness < 0.52
+    )
+
+    return {
+        "body_completeness_score": completeness,
+        "partial_body": partial_body,
+        "upper_body_visible": bool(upper_body_visible),
+        "lower_body_visible": bool(lower_body_visible),
+        "torso_visible": bool(torso_visible),
+    }
+
+
+def estimate_view_reliability_for_3d(
+    bbox: BoxXYXY,
+    image_shape: Tuple[int, int, int],
+    pose_2d: Optional[np.ndarray],
+    joint_confidences: Optional[np.ndarray],
+    pose_confidence: float,
+    min_joint_confidence: float = 0.25,
+    min_valid_joints: int = 8,
+    min_valid_joint_ratio: float = 0.38,
+    min_pose_confidence: float = 0.20,
+) -> Dict[str, object]:
+    """Estime si une vue peut être utilisée pour la pose 3D learned.
+
+    Important : une vue non fiable reste disponible pour le tracking. On évite
+    seulement de l'utiliser comme crop 3D quand la personne est coupée, au bord
+    de l'image ou avec trop peu de keypoints fiables.
+    """
+    quality = compute_bbox_image_quality(bbox, image_shape)
+    valid_joint_count, valid_joint_ratio = compute_joint_visibility(
+        joint_confidences,
+        min_joint_confidence=min_joint_confidence,
+    )
+    body_quality = compute_body_completeness(
+        joint_confidences,
+        min_joint_confidence=min_joint_confidence,
+    )
+
+    has_pose = pose_2d is not None and joint_confidences is not None
+
+    touches_left = bool(quality["touches_left"])
+    touches_right = bool(quality["touches_right"])
+    touches_top = bool(quality["touches_top"])
+    touches_bottom = bool(quality["touches_bottom"])
+
+    # Coupure latérale/haut = très risqué pour la 3D.
+    # Coupure bas = risqué surtout si peu d'articulations sont visibles.
+    edge_truncated = bool(
+        touches_left
+        or touches_right
+        or touches_top
+        or (touches_bottom and valid_joint_ratio < 0.65)
+    )
+
+    reasons: List[str] = []
+
+    if not has_pose:
+        reasons.append("no_pose")
+
+    if valid_joint_count < int(min_valid_joints):
+        reasons.append("few_valid_joints")
+
+    if valid_joint_ratio < float(min_valid_joint_ratio):
+        reasons.append("low_joint_visibility")
+
+    if float(pose_confidence) < float(min_pose_confidence):
+        reasons.append("low_pose_confidence")
+
+    if edge_truncated:
+        reasons.append("edge_truncated")
+
+    if bool(body_quality["partial_body"]):
+        reasons.append("partial_body")
+
+    if float(quality["bbox_height_ratio"]) < 0.08:
+        reasons.append("bbox_too_short")
+
+    if float(quality["bbox_width_ratio"]) < 0.025:
+        reasons.append("bbox_too_narrow")
+
+    reliable = len(reasons) == 0
+
+    quality.update({
+        "edge_truncated": bool(edge_truncated),
+        "valid_joint_count": int(valid_joint_count),
+        "valid_joint_ratio": float(valid_joint_ratio),
+        "body_completeness_score": float(body_quality["body_completeness_score"]),
+        "partial_body": bool(body_quality["partial_body"]),
+        "upper_body_visible": bool(body_quality["upper_body_visible"]),
+        "lower_body_visible": bool(body_quality["lower_body_visible"]),
+        "torso_visible": bool(body_quality["torso_visible"]),
+        "reliable_for_3d": bool(reliable),
+        "unreliable_reason": "|".join(reasons),
+    })
+
+    return quality
+
+
+def detection_bbox_area(detection: ViewDetection) -> float:
+    x1, y1, x2, y2 = detection.bbox_xyxy
+    return float(max(0, x2 - x1) * max(0, y2 - y1))
+
+
+def detection_intersection_area(a: ViewDetection, b: ViewDetection) -> float:
+    ax1, ay1, ax2, ay2 = a.bbox_xyxy
+    bx1, by1, bx2, by2 = b.bbox_xyxy
+
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+
+    return float(max(0, ix2 - ix1) * max(0, iy2 - iy1))
+
+
+def detection_iou(a: ViewDetection, b: ViewDetection) -> float:
+    inter = detection_intersection_area(a, b)
+
+    if inter <= 0:
+        return 0.0
+
+    area_a = detection_bbox_area(a)
+    area_b = detection_bbox_area(b)
+    union = area_a + area_b - inter
+
+    if union <= 0:
+        return 0.0
+
+    return float(inter / union)
+
+
+def detection_containment(a: ViewDetection, b: ViewDetection) -> float:
+    """
+    Fraction de la plus petite bbox contenue dans l'intersection.
+    Utile pour détecter une bbox partielle incluse dans une bbox complète.
+    """
+    inter = detection_intersection_area(a, b)
+
+    if inter <= 0:
+        return 0.0
+
+    area_a = detection_bbox_area(a)
+    area_b = detection_bbox_area(b)
+    small_area = max(1.0, min(area_a, area_b))
+
+    return float(inter / small_area)
+
+
+def detection_center_distance_ratio(a: ViewDetection, b: ViewDetection) -> float:
+    ax1, ay1, ax2, ay2 = a.bbox_xyxy
+    bx1, by1, bx2, by2 = b.bbox_xyxy
+
+    center_a = np.array(
+        [0.5 * (ax1 + ax2), 0.5 * (ay1 + ay2)],
+        dtype=np.float32,
+    )
+    center_b = np.array(
+        [0.5 * (bx1 + bx2), 0.5 * (by1 + by2)],
+        dtype=np.float32,
+    )
+
+    scale = np.sqrt(max(detection_bbox_area(a), detection_bbox_area(b), 1.0))
+    return float(np.linalg.norm(center_a - center_b) / scale)
+
+
+def cosine_distance_optional(
+    feature_a: Optional[np.ndarray],
+    feature_b: Optional[np.ndarray],
+) -> Optional[float]:
+    if feature_a is None or feature_b is None:
+        return None
+
+    a = np.asarray(feature_a, dtype=np.float32)
+    b = np.asarray(feature_b, dtype=np.float32)
+
+    norm_a = np.linalg.norm(a)
+    norm_b = np.linalg.norm(b)
+
+    if norm_a <= 1e-12 or norm_b <= 1e-12:
+        return None
+
+    a = a / norm_a
+    b = b / norm_b
+
+    return float(1.0 - np.dot(a, b))
+
+
+def detection_valid_pose_center(detection: ViewDetection) -> Optional[np.ndarray]:
+    if detection.pose_2d is None or detection.joint_confidences is None:
+        return None
+
+    return valid_pose_center(
+        pose_2d=detection.pose_2d,
+        joint_confidences=detection.joint_confidences,
+        min_joint_confidence=0.25,
+        min_valid_joints=4,
+    )
+
+
+def pose_centers_are_clearly_different(
+    a: ViewDetection,
+    b: ViewDetection,
+    threshold_ratio: float = 0.35,
+) -> bool:
+    """
+    True si les poses suggèrent clairement deux personnes différentes.
+    Dans ce cas, même avec beaucoup d'overlap, on garde les deux bbox.
+    """
+    center_a = detection_valid_pose_center(a)
+    center_b = detection_valid_pose_center(b)
+
+    if center_a is None or center_b is None:
+        return False
+
+    ax1, ay1, ax2, ay2 = a.bbox_xyxy
+    bx1, by1, bx2, by2 = b.bbox_xyxy
+
+    scale = max(
+        float(ax2 - ax1),
+        float(ay2 - ay1),
+        float(bx2 - bx1),
+        float(by2 - by1),
+        1.0,
+    )
+
+    distance = float(np.linalg.norm(center_a - center_b))
+    return distance / scale > threshold_ratio
+
+
+def detection_quality_score(detection: ViewDetection) -> float:
+    """
+    Score simple pour choisir quelle bbox garder quand deux bbox sont
+    très probablement le même humain.
+    """
+    area = detection_bbox_area(detection)
+
+    pose_bonus = 0.0
+    if detection.pose_2d is not None:
+        pose_bonus += 0.20
+
+    visibility_bonus = 0.0
+    if detection.joint_confidences is not None and len(detection.joint_confidences) > 0:
+        visibility_bonus = 0.15 * float(np.mean(detection.joint_confidences > 0.25))
+
+    area_bonus = 0.03 * float(np.log1p(area / 10000.0))
+
+    return float(detection.confidence + pose_bonus + visibility_bonus + area_bonus)
+
+
+def detection_size_similarity(a: ViewDetection, b: ViewDetection) -> float:
+    ax1, ay1, ax2, ay2 = a.bbox_xyxy
+    bx1, by1, bx2, by2 = b.bbox_xyxy
+
+    aw = max(1.0, float(ax2 - ax1))
+    ah = max(1.0, float(ay2 - ay1))
+    bw = max(1.0, float(bx2 - bx1))
+    bh = max(1.0, float(by2 - by1))
+
+    width_similarity = min(aw, bw) / max(aw, bw)
+    height_similarity = min(ah, bh) / max(ah, bh)
+    return float(min(width_similarity, height_similarity))
+
+
+def should_suppress_as_duplicate(
+    a: ViewDetection,
+    b: ViewDetection,
+) -> bool:
+    """
+    Retourne True seulement si a et b sont très probablement deux bbox
+    de la même personne dans la même caméra.
+
+    Correction importante : les doublons ultra-identiques YOLO/ByteTrack
+    doivent être supprimés AVANT les tests ReID/pose. Sur nos CSV, ces
+    doublons avaient parfois un ReID instable ou une pose légèrement différente,
+    alors qu'ils étaient pixel par pixel la même bbox.
+
+    Pour ne pas supprimer une vraie personne derrière une autre, cette règle
+    ultra-stricte exige à la fois : IoU très haut, centres quasi identiques et
+    tailles quasi identiques. L'overlap seul ne suffit toujours pas.
+    """
+    iou = detection_iou(a, b)
+    containment = detection_containment(a, b)
+    center_ratio = detection_center_distance_ratio(a, b)
+    size_similarity = detection_size_similarity(a, b)
+
+    # Cas le plus important observé dans les CSV : deux bbox quasi identiques
+    # sur la même personne. On supprime même si ReID/pose sont bruités.
+    if iou >= 0.92 and center_ratio <= 0.08 and size_similarity >= 0.88:
+        return True
+
+    # Variante un peu moins stricte pour les bbox avec IoU ~0.85 mais centre et
+    # taille quasiment identiques. Cela couvre les frames où une bbox est juste
+    # légèrement plus étroite, sans toucher les vraies personnes superposées.
+    if iou >= 0.84 and center_ratio <= 0.05 and size_similarity >= 0.82:
+        return True
+
+    appearance_distance = cosine_distance_optional(a.feature, b.feature)
+
+    # Si les poses ont deux centres clairement différents, ce sont probablement
+    # deux personnes différentes, même si les bbox se chevauchent.
+    if pose_centers_are_clearly_different(a, b):
+        return False
+
+    # Si le ReID est disponible et dit clairement différent, on garde les deux.
+    if appearance_distance is not None and appearance_distance > 0.30:
+        return False
+
+    # Cas très sûr : presque exactement la même bbox.
+    if iou >= 0.85 and center_ratio <= 0.15 and size_similarity >= 0.75:
+        return True
+
+    # Cas bbox partielle + bbox complète :
+    # on supprime seulement si la zone est très contenue ET si ReID/position
+    # suggèrent fortement que c'est le même humain.
+    if containment >= 0.88 and center_ratio <= 0.25:
+        if appearance_distance is not None and appearance_distance < 0.18:
+            return True
+
+        # Sans ReID, on est extrêmement conservateur pour ne pas supprimer
+        # une personne derrière une autre.
+        if appearance_distance is None and containment >= 0.96 and center_ratio <= 0.15:
+            return True
+
+    return False
+
+
+def suppress_duplicate_detections_same_camera(
+    detections: List[ViewDetection],
+) -> List[ViewDetection]:
+    """
+    Supprime les doublons intra-caméra du type :
+    - grande bbox corps complet
+    - petite bbox partielle sur la même personne
+
+    La fonction est volontairement conservatrice : quand il peut s'agir d'une
+    personne derrière une autre, elle garde les deux bbox.
+    """
+    if len(detections) <= 1:
+        return detections
+
+    suppressed: set[int] = set()
+
+    for i in range(len(detections)):
+        if i in suppressed:
+            continue
+
+        for j in range(i + 1, len(detections)):
+            if j in suppressed:
+                continue
+
+            det_i = detections[i]
+            det_j = detections[j]
+
+            if det_i.camera_name != det_j.camera_name:
+                continue
+
+            if not should_suppress_as_duplicate(det_i, det_j):
+                continue
+
+            score_i = detection_quality_score(det_i)
+            score_j = detection_quality_score(det_j)
+
+            area_i = detection_bbox_area(det_i)
+            area_j = detection_bbox_area(det_j)
+
+            # Si la qualité est proche, garder la bbox la plus grande.
+            # Sinon garder celle qui a clairement la meilleure qualité.
+            if abs(score_i - score_j) < 0.20:
+                keep_i = area_i >= area_j
+            else:
+                keep_i = score_i >= score_j
+
+            if keep_i:
+                suppressed.add(j)
+            else:
+                suppressed.add(i)
+                break
+
+    return [
+        detection
+        for index, detection in enumerate(detections)
+        if index not in suppressed
+    ]
+
+
 class SingleCameraDetector:
     def __init__(
         self,
@@ -253,6 +785,16 @@ class SingleCameraDetector:
 
         self.use_torso_crop = use_torso_crop
         self.bbox_margin_ratio = bbox_margin_ratio
+
+        # Données de debug de la dernière frame traitée.
+        # Elles servent à écrire des CSV d'évaluation sans dépendre de la console.
+        self.last_raw_yolo_debug: List[Dict[str, object]] = []
+        self.last_detection_counts: Dict[str, int] = {
+            "raw_yolo": 0,
+            "valid_after_clip": 0,
+            "before_suppression": 0,
+            "after_suppression": 0,
+        }
 
     def detect_pose(self, frame_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         try:
@@ -363,6 +905,15 @@ class SingleCameraDetector:
         return crop
 
     def process(self, frame_bgr: np.ndarray) -> List[ViewDetection]:
+        # Reset debug info for this frame/camera.
+        self.last_raw_yolo_debug = []
+        self.last_detection_counts = {
+            "raw_yolo": 0,
+            "valid_after_clip": 0,
+            "before_suppression": 0,
+            "after_suppression": 0,
+        }
+
         poses_2d, pose_scores = self.detect_pose(frame_bgr)
         yolo_results = self.detect_yolo(frame_bgr)
 
@@ -376,6 +927,7 @@ class SingleCameraDetector:
 
         raw_boxes = result.boxes
         yolo_ids = raw_boxes.id
+        self.last_detection_counts["raw_yolo"] = int(len(raw_boxes))
 
         boxes_xyxy: List[BoxXYXY] = []
         confidences: List[float] = []
@@ -383,11 +935,8 @@ class SingleCameraDetector:
 
         for index, box in enumerate(raw_boxes):
             xyxy = box.xyxy[0].detach().cpu().numpy()
-            bbox = tuple(int(round(value)) for value in xyxy)
-            bbox = clip_bbox_xyxy(bbox, frame_bgr.shape)
-
-            if bbox is None:
-                continue
+            raw_bbox = tuple(int(round(value)) for value in xyxy)
+            bbox = clip_bbox_xyxy(raw_bbox, frame_bgr.shape)
 
             confidence = float(box.conf[0].detach().cpu().item())
 
@@ -398,9 +947,31 @@ class SingleCameraDetector:
                 except Exception:
                     tracklet_id = None
 
+            class_id = self.person_class_id
+            try:
+                if hasattr(box, "cls") and box.cls is not None:
+                    class_id = int(box.cls[0].detach().cpu().item())
+            except Exception:
+                class_id = self.person_class_id
+
+            self.last_raw_yolo_debug.append({
+                "raw_index": int(index),
+                "tracklet_id": tracklet_id,
+                "confidence": float(confidence),
+                "class_id": int(class_id),
+                "valid_after_clip": bbox is not None,
+                "bbox_xyxy": bbox,
+                "raw_bbox_xyxy": raw_bbox,
+            })
+
+            if bbox is None:
+                continue
+
             boxes_xyxy.append(bbox)
             confidences.append(confidence)
             tracklet_ids.append(tracklet_id)
+
+        self.last_detection_counts["valid_after_clip"] = int(len(boxes_xyxy))
 
         associations = self.associate_boxes_and_poses(
             boxes_xyxy=boxes_xyxy,
@@ -432,6 +1003,15 @@ class SingleCameraDetector:
             if reid_crop is not None:
                 feature = self.reid.predict(reid_crop)
 
+            view_quality = estimate_view_reliability_for_3d(
+                bbox=bbox,
+                image_shape=frame_bgr.shape,
+                pose_2d=pose_2d,
+                joint_confidences=joint_confidences,
+                pose_confidence=pose_confidence,
+                min_joint_confidence=self.pose_min_joint_confidence,
+            )
+
             detections.append(
                 ViewDetection(
                     camera_name=self.camera_name,
@@ -442,10 +1022,30 @@ class SingleCameraDetector:
                     pose_2d=pose_2d,
                     pose_confidence=pose_confidence,
                     joint_confidences=joint_confidences,
+                    image_width=int(view_quality["image_width"]),
+                    image_height=int(view_quality["image_height"]),
+                    bbox_width_ratio=float(view_quality["bbox_width_ratio"]),
+                    bbox_height_ratio=float(view_quality["bbox_height_ratio"]),
+                    bbox_area_ratio=float(view_quality["bbox_area_ratio"]),
+                    touches_border=bool(view_quality["touches_border"]),
+                    edge_truncated=bool(view_quality["edge_truncated"]),
+                    valid_joint_count=int(view_quality["valid_joint_count"]),
+                    valid_joint_ratio=float(view_quality["valid_joint_ratio"]),
+                    reliable_for_3d=bool(view_quality["reliable_for_3d"]),
+                    unreliable_reason=str(view_quality["unreliable_reason"]),
+                    body_completeness_score=float(view_quality["body_completeness_score"]),
+                    partial_body=bool(view_quality["partial_body"]),
+                    upper_body_visible=bool(view_quality["upper_body_visible"]),
+                    lower_body_visible=bool(view_quality["lower_body_visible"]),
+                    torso_visible=bool(view_quality["torso_visible"]),
                 )
             )
 
-        return detections
+        self.last_detection_counts["before_suppression"] = int(len(detections))
+        final_detections = suppress_duplicate_detections_same_camera(detections)
+        self.last_detection_counts["after_suppression"] = int(len(final_detections))
+
+        return final_detections
 
 
 class MultiCameraDetector:
@@ -511,6 +1111,18 @@ class MultiCameraDetector:
             )
 
         return detections_by_camera
+
+    def raw_yolo_debug_by_camera(self) -> Dict[str, List[Dict[str, object]]]:
+        return {
+            camera_name: list(self.detectors[camera_name].last_raw_yolo_debug)
+            for camera_name in self.camera_names
+        }
+
+    def detection_counts_by_camera(self) -> Dict[str, Dict[str, int]]:
+        return {
+            camera_name: dict(self.detectors[camera_name].last_detection_counts)
+            for camera_name in self.camera_names
+        }
 
 
 def print_detection_summary(

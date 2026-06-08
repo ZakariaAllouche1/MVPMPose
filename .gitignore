@@ -337,6 +337,7 @@ labels
 /mot_import_tmp/
 *.xcp
 *.json
+*.npy
 # --- Autoriser les données prétraitées ---
 !data/preprocessed/
 !data/preprocessed/**

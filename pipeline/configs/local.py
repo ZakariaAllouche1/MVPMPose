@@ -53,22 +53,7 @@ alg_weights_path = models_dir / "triangulation" / "best_alg_19_18j.pth"
 # vol_weights_path = models_dir / "triangulation" / "best_vol_19_18j_loss.pth"
 vol_weights_path = models_dir / "triangulation" / "best_vol_19_18j_96.pth"
 
-# Si tu n'as pas déplacé les poids ALG dans models/, utilise plutôt :
-# alg_weights_path = (
-#     project_root
-#     / "data"
-#     / "pretrained"
-#     / "human36m"
-#     / "human36m_alg_10-04-2019"
-#     / "checkpoints"
-#     / "0060"
-#     / "weights.pth"
-# )
-
-
 # Détection
-# Seuil bas pour ne pas casser les tracks pendant les frames difficiles.
-# La création d'une nouvelle track reste filtrée plus bas.
 yolo_confidence = 0.20
 yolo_person_class = 0
 yolo_tracker_config = "bytetrack.yaml"
@@ -165,10 +150,6 @@ learned_pose_device = "cuda"
 learned_pose_bbox_scale = 1.25
 learned_pose_square_crop = True
 
-# Qualité minimale des vues utilisées pour la pose 3D learned.
-# Une bbox peut rester utilisée pour le tracking 2D/global_id, mais être rejetée
-# pour la reconstruction 3D si elle est partielle, coupée ou trop pauvre en
-# keypoints.
 learned_pose_min_reliable_joints = 8
 learned_pose_min_reliable_joint_ratio = 0.38
 learned_pose_min_pose_confidence = 0.20
@@ -176,10 +157,6 @@ learned_pose_reject_edge_truncated = True
 learned_pose_min_bbox_height_ratio = 0.08
 learned_pose_min_bbox_width_ratio = 0.025
 
-# Visualisation honnête des poses non fiables.
-# On ne réutilise jamais une ancienne pose. Si une pose est affichée en [low3D],
-# elle a été calculée sur la frame courante avec les vraies bbox disponibles,
-# mais elle n'est pas écrite dans le CSV final fiable.
 show_unreliable_reprojection = True
 save_unreliable_pose_csv = True
 
@@ -199,12 +176,10 @@ save_reprojection_images = True
 save_3d_images = True
 save_failure_log = True
 
-# Exports CSV d'évaluation/débug complets.
-# Détection/tracking restent dans outputs/csv.
+# Exports
 save_debug_exports = True
 
-# Images debug seulement.
-# Mettre 10 ou 50 si tu ne veux pas générer trop d'images.
+# Images debug seulement
 save_reprojection_every = 1
 save_3d_every = 1
 
@@ -212,8 +187,7 @@ save_3d_every = 1
 # Sauvegarde vidéo finale
 save_output_videos = True
 
-# None garde la taille originale des vidéos.
-# Exemple possible : (1280, 720)
+# None garde la taille originale des vidéos
 video_output_size = None
 
 video_output_codec = "mp4v"

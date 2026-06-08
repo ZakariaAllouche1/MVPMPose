@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 
-joint_names_15: List[str] = [
+joint_names_18: List[str] = [
     "Head",
     "Trunk",
     "Pelvis",
@@ -22,38 +22,44 @@ joint_names_15: List[str] = [
     "Elbow_L",
     "Wrist_R",
     "Wrist_L",
+    "Neck",
+    "Foot_R",
+    "Foot_L",
 ]
 
 
-pelvis_15_index = 2
+pelvis_18_index = 2
 
 
-skeleton_15: List[Tuple[int, int]] = [
-    (0, 1),
-    (1, 2),
+skeleton_18: List[Tuple[int, int]] = [
+    (0, 15),   # Head - Neck
+    (15, 1),   # Neck - Trunk
+    (1, 2),    # Trunk - Pelvis
 
-    (1, 9),
-    (9, 11),
-    (11, 13),
+    (15, 9),   # Neck - Shoulder_R
+    (9, 11),   # Shoulder_R - Elbow_R
+    (11, 13),  # Elbow_R - Wrist_R
 
-    (1, 10),
-    (10, 12),
-    (12, 14),
+    (15, 10),  # Neck - Shoulder_L
+    (10, 12),  # Shoulder_L - Elbow_L
+    (12, 14),  # Elbow_L - Wrist_L
 
-    (2, 3),
-    (3, 5),
-    (5, 7),
+    (2, 3),    # Pelvis - Hip_R
+    (3, 5),    # Hip_R - Knee_R
+    (5, 7),    # Knee_R - Ankle_R
+    (7, 16),   # Ankle_R - Foot_R
 
-    (2, 4),
-    (4, 6),
-    (6, 8),
+    (2, 4),    # Pelvis - Hip_L
+    (4, 6),    # Hip_L - Knee_L
+    (6, 8),    # Knee_L - Ankle_L
+    (8, 17),   # Ankle_L - Foot_L
 ]
 
 
-model17_from_15_np = np.array(
+model19_to_18_np = np.array(
     [
         9,   # Head
-        8,   # Trunk
+        8,   # Trunk / Thorax
         6,   # Pelvis
         2,   # Hip_R
         3,   # Hip_L
@@ -67,44 +73,48 @@ model17_from_15_np = np.array(
         14,  # Elbow_L
         10,  # Wrist_R
         15,  # Wrist_L
+        16,  # Neck
+        17,  # Foot_R
+        18,  # Foot_L
     ],
     dtype=np.int64,
 )
 
 
-model17_from_15_torch = torch.tensor(
-    model17_from_15_np.tolist(),
+model19_to_18_torch_indices = torch.tensor(
+    model19_to_18_np.tolist(),
     dtype=torch.long,
 )
 
 
-def model17_to_15_numpy(keypoints17: np.ndarray) -> np.ndarray:
-    keypoints17 = np.asarray(keypoints17, dtype=np.float32)
+def model19_to_18_numpy(keypoints19: np.ndarray) -> np.ndarray:
+    keypoints19 = np.asarray(keypoints19, dtype=np.float32)
 
-    if keypoints17.shape[-2:] != (17, 3):
+    if keypoints19.shape[-2:] != (19, 3):
         raise ValueError(
-            f"keypoints17 doit avoir shape [..., 17, 3], reçu: {keypoints17.shape}"
+            f"keypoints19 doit avoir shape [..., 19, 3], reçu: {keypoints19.shape}"
         )
 
-    return keypoints17[..., model17_from_15_np, :].astype(np.float32)
+    return keypoints19[..., model19_to_18_np, :].astype(np.float32)
 
 
-def model17_to_15_torch(keypoints17: torch.Tensor) -> torch.Tensor:
-    if keypoints17.shape[-2:] != (17, 3):
+def model19_to_18_torch(keypoints19: torch.Tensor) -> torch.Tensor:
+    if keypoints19.shape[-2:] != (19, 3):
         raise ValueError(
-            f"keypoints17 doit avoir shape [..., 17, 3], reçu: {tuple(keypoints17.shape)}"
+            f"keypoints19 doit avoir shape [..., 19, 3], reçu: {tuple(keypoints19.shape)}"
         )
 
-    indices = model17_from_15_torch.to(keypoints17.device)
-    return keypoints17.index_select(dim=-2, index=indices)
+    indices = model19_to_18_torch_indices.to(keypoints19.device)
+    return keypoints19.index_select(dim=-2, index=indices)
 
 
-def get_root_position_15(keypoints15: np.ndarray) -> np.ndarray:
-    keypoints15 = np.asarray(keypoints15, dtype=np.float32)
+def get_root_position_18(keypoints18: np.ndarray) -> np.ndarray:
+    keypoints18 = np.asarray(keypoints18, dtype=np.float32)
 
-    if keypoints15.shape[-2:] != (15, 3):
+    if keypoints18.shape[-2:] != (18, 3):
         raise ValueError(
-            f"keypoints15 doit avoir shape [..., 15, 3], reçu: {keypoints15.shape}"
+            f"keypoints18 doit avoir shape [..., 18, 3], reçu: {keypoints18.shape}"
         )
 
-    return keypoints15[pelvis_15_index].astype(np.float32)
+    return keypoints18[pelvis_18_index].astype(np.float32)
+

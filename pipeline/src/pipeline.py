@@ -60,7 +60,12 @@ def build_detector(cfg: Any) -> MultiCameraDetector:
     )
 
 
-def build_tracker(cfg: Any) -> MultiViewTracker:
+def build_tracker(cfg: Any, activity_name: str) -> MultiViewTracker:
+    association_debug_path = None
+
+    if getattr(cfg, "save_association_debug", False):
+        association_debug_path = cfg.debug_dir / f"{activity_name}_association_debug.csv"
+
     return MultiViewTracker(
         camera_names=cfg.camera_names,
         track_patience=cfg.track_patience,
@@ -75,6 +80,7 @@ def build_tracker(cfg: Any) -> MultiViewTracker:
         motion_weight=cfg.motion_weight,
         appearance_weight=cfg.appearance_weight,
         spatial_weight=getattr(cfg, "spatial_weight", 0.35),
+        association_margin=getattr(cfg, "association_margin", 0.15),
         reprojection_error_threshold=getattr(cfg, "reprojection_error_threshold", 120.0),
         spatial_consistency_threshold_mm=getattr(cfg, "spatial_consistency_threshold_mm", 1500.0),
         duplicate_merge_distance_mm=getattr(cfg, "duplicate_merge_distance_mm", 600.0),
@@ -115,6 +121,32 @@ def build_tracker(cfg: Any) -> MultiViewTracker:
             "strong_spatial_score_for_featureless_pair",
             0.65,
         ),
+        single_view_reassociation_margin=getattr(
+            cfg,
+            "single_view_reassociation_margin",
+            0.20,
+        ),
+        single_view_reassociation_max_score=getattr(
+            cfg,
+            "single_view_reassociation_max_score",
+            0.85,
+        ),
+        single_view_reassociation_max_missing=getattr(
+            cfg,
+            "single_view_reassociation_max_missing",
+            80,
+        ),
+        single_view_motion_threshold_without_feature=getattr(
+            cfg,
+            "single_view_motion_threshold_without_feature",
+            0.35,
+        ),
+        single_view_appearance_reject_threshold=getattr(
+            cfg,
+            "single_view_appearance_reject_threshold",
+            0.55,
+        ),
+        association_debug_path=association_debug_path,
     )
 
 
@@ -169,6 +201,134 @@ def should_save_frame(frame_id: int, every: int) -> bool:
     return frame_id % every == 0
 
 
+def track_is_confirmed_for_learned_pose(track) -> bool:
+    return track.state.name in {"confirmed_2d", "confirmed_3d"}
+
+
+def detection_is_reliable_for_learned_pose(detection, cfg: Any) -> bool:
+    """Décide si une vraie détection YOLO est fiable pour la pose 3D.
+
+    Une détection peut être correcte pour le tracking 2D mais mauvaise pour la
+    3D si elle est tronquée, au bord de l'image ou avec trop peu de keypoints.
+    Les seuils ont des valeurs par défaut et peuvent être changés dans local.py.
+    """
+    if detection.pose_2d is None or detection.joint_confidences is None:
+        return False
+
+    if not bool(getattr(detection, "reliable_for_3d", True)):
+        return False
+
+    if bool(getattr(detection, "partial_body", False)):
+        return False
+
+    if int(getattr(detection, "valid_joint_count", 0)) < int(
+        getattr(cfg, "learned_pose_min_reliable_joints", 8)
+    ):
+        return False
+
+    if float(getattr(detection, "valid_joint_ratio", 0.0)) < float(
+        getattr(cfg, "learned_pose_min_reliable_joint_ratio", 0.38)
+    ):
+        return False
+
+    if float(getattr(detection, "pose_confidence", 0.0)) < float(
+        getattr(cfg, "learned_pose_min_pose_confidence", 0.20)
+    ):
+        return False
+
+    if bool(getattr(cfg, "learned_pose_reject_edge_truncated", True)):
+        if bool(getattr(detection, "edge_truncated", False)):
+            return False
+
+    if float(getattr(detection, "bbox_height_ratio", 0.0)) < float(
+        getattr(cfg, "learned_pose_min_bbox_height_ratio", 0.08)
+    ):
+        return False
+
+    if float(getattr(detection, "bbox_width_ratio", 0.0)) < float(
+        getattr(cfg, "learned_pose_min_bbox_width_ratio", 0.025)
+    ):
+        return False
+
+    return True
+
+
+def reliable_boxes_for_learned_pose(track, cfg: Any):
+    boxes_by_camera = {}
+    rejected_by_camera = {}
+
+    for camera_name, detection in track.current_detections.items():
+        if detection_is_reliable_for_learned_pose(detection, cfg):
+            boxes_by_camera[camera_name] = detection.bbox_xyxy
+        else:
+            rejected_by_camera[camera_name] = getattr(
+                detection,
+                "unreliable_reason",
+                "unreliable_for_3d",
+            )
+
+    return boxes_by_camera, rejected_by_camera
+
+
+def run_unreliable_learned_pose_fallback(
+    cfg: Any,
+    frame_id: int,
+    track,
+    frames_by_camera,
+    cameras_by_camera,
+    learned_pose: LearnedPoseEstimator,
+    outputs: ActivityOutputs,
+    boxes_by_camera,
+    reason: str,
+) -> bool:
+    """Calcule une pose low3D sur la frame courante pour le debug visuel.
+
+    Cette pose n'est lancée que lorsque la pose fiable n'est pas possible, mais
+    qu'on a quand même au moins min_views vraies bbox courantes. Elle n'est pas
+    écrite dans le CSV 3D final et ne met pas à jour la position 3D de tracking.
+    """
+    if not bool(getattr(cfg, "show_unreliable_reprojection", True)):
+        return False
+
+    if len(boxes_by_camera) < int(cfg.min_views_for_learned_pose):
+        return False
+
+    result = learned_pose.infer_track(
+        person_id=track.global_id,
+        frames_by_camera=frames_by_camera,
+        boxes_by_camera=boxes_by_camera,
+        cameras_by_camera=cameras_by_camera,
+        min_views=cfg.min_views_for_learned_pose,
+        bbox_scale=cfg.learned_pose_bbox_scale,
+        square_crop=cfg.learned_pose_square_crop,
+    )
+
+    if result is None:
+        return False
+
+    track.update_unreliable_3d_pose(
+        pose_3d_19=result.keypoints19,
+        pose_3d_18=result.keypoints18,
+        score=result.score,
+        views_used=result.views_used,
+        reason=reason,
+    )
+
+    outputs.write_unreliable_pose(
+        frame_id=frame_id,
+        track=track,
+    )
+
+    print(
+        f"[learned pose low3D] frame={frame_id} "
+        f"id={track.global_id} "
+        f"views={result.views_used} "
+        f"score={result.score:.3f} "
+        f"reason={reason}"
+    )
+    return True
+
+
 def run_learned_pose_for_tracks(
     cfg: Any,
     frame_id: int,
@@ -184,21 +344,58 @@ def run_learned_pose_for_tracks(
         if track.time_since_update != 0:
             continue
 
-        views = sorted(track.current_bbox.keys())
+        if not track_is_confirmed_for_learned_pose(track):
+            continue
 
-        if len(track.current_bbox) < cfg.min_views_for_learned_pose:
+        all_real_boxes_by_camera = {
+            camera_name: detection.bbox_xyxy
+            for camera_name, detection in track.current_detections.items()
+        }
+        all_real_views = sorted(all_real_boxes_by_camera.keys())
+        reliable_boxes_by_camera, rejected_views = reliable_boxes_for_learned_pose(
+            track,
+            cfg,
+        )
+        views = sorted(reliable_boxes_by_camera.keys())
+
+        if len(track.current_detections) < cfg.min_views_for_learned_pose:
             outputs.write_failure(
                 frame_id=frame_id,
                 person_id=track.global_id,
                 reason="not_enough_views",
-                views=views,
+                views=all_real_views,
+            )
+            continue
+
+        if len(reliable_boxes_by_camera) < cfg.min_views_for_learned_pose:
+            rejected_summary = [
+                f"{cam}:{reason}"
+                for cam, reason in sorted(rejected_views.items())
+            ]
+            outputs.write_failure(
+                frame_id=frame_id,
+                person_id=track.global_id,
+                reason="not_enough_reliable_views",
+                views=views + rejected_summary,
+            )
+
+            run_unreliable_learned_pose_fallback(
+                cfg=cfg,
+                frame_id=frame_id,
+                track=track,
+                frames_by_camera=frames_by_camera,
+                cameras_by_camera=cameras_by_camera,
+                learned_pose=learned_pose,
+                outputs=outputs,
+                boxes_by_camera=all_real_boxes_by_camera,
+                reason="not_enough_reliable_views",
             )
             continue
 
         result = learned_pose.infer_track(
             person_id=track.global_id,
             frames_by_camera=frames_by_camera,
-            boxes_by_camera=track.current_bbox,
+            boxes_by_camera=reliable_boxes_by_camera,
             cameras_by_camera=cameras_by_camera,
             min_views=cfg.min_views_for_learned_pose,
             bbox_scale=cfg.learned_pose_bbox_scale,
@@ -212,11 +409,23 @@ def run_learned_pose_for_tracks(
                 reason="learned_pose_failed",
                 views=views,
             )
+            if set(all_real_boxes_by_camera.keys()) != set(reliable_boxes_by_camera.keys()):
+                run_unreliable_learned_pose_fallback(
+                    cfg=cfg,
+                    frame_id=frame_id,
+                    track=track,
+                    frames_by_camera=frames_by_camera,
+                    cameras_by_camera=cameras_by_camera,
+                    learned_pose=learned_pose,
+                    outputs=outputs,
+                    boxes_by_camera=all_real_boxes_by_camera,
+                    reason="reliable_pose_failed_fallback_all_real_views",
+                )
             continue
 
         track.update_3d_pose(
-            pose_3d_17=result.keypoints17,
-            pose_3d_15=result.keypoints15,
+            pose_3d_19=result.keypoints19,
+            pose_3d_18=result.keypoints18,
             root_position=result.root_position,
             score=result.score,
             views_used=result.views_used,
@@ -256,7 +465,7 @@ def run_activity(
     print_camera_summary(cameras)
 
     detector = build_detector(cfg)
-    tracker = build_tracker(cfg)
+    tracker = build_tracker(cfg, activity.name)
 
     outputs = ActivityOutputs(
         activity_name=activity.name,
@@ -264,6 +473,9 @@ def run_activity(
         debug_dir=cfg.debug_dir,
         save_csv=cfg.save_csv_3d,
         save_failures=cfg.save_failure_log,
+        camera_names=cfg.camera_names,
+        save_debug_exports=getattr(cfg, "save_debug_exports", True),
+        save_unreliable_pose_csv=getattr(cfg, "save_unreliable_pose_csv", True),
     )
 
     video_writers = None
@@ -321,6 +533,13 @@ def run_activity(
                 detections_by_camera = detector.process(frames)
                 print_detection_summary(frame_id, detections_by_camera)
 
+                outputs.write_detection_frame(
+                    frame_id=frame_id,
+                    detections_by_camera=detections_by_camera,
+                    raw_yolo_by_camera=detector.raw_yolo_debug_by_camera(),
+                    detection_counts_by_camera=detector.detection_counts_by_camera(),
+                )
+
                 tracker.update(
                     frame_id=frame_id,
                     detections_by_camera=detections_by_camera,
@@ -340,6 +559,11 @@ def run_activity(
                 )
 
                 print(f"[learned pose] poses reconstruites: {num_learned_poses}")
+
+                outputs.write_tracking_frame(
+                    frame_id=frame_id,
+                    tracks=tracker.active_tracks(),
+                )
 
                 if cfg.save_csv_3d:
                     outputs.write_pose_frame(
@@ -390,6 +614,7 @@ def run_activity(
 
     finally:
         outputs.close()
+        tracker.close()
 
         if video_writers is not None:
             video_writers.close()

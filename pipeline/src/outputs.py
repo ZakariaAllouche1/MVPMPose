@@ -9,11 +9,50 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import numpy as np
 
 from src.cameras import CameraData
 from src.geometry import project_points
 from src.joints import joint_names_18, pelvis_18_index, skeleton_18
+
+try:
+    from src.joints import metasport32_names
+except ImportError:
+    metasport32_names = [
+    "C7",
+    "T10",
+    "MAN",
+    "STRN",
+    "ROCC",
+    "LOCC",
+    "RASI",
+    "LASI",
+    "RPSI",
+    "LPSI",
+    "RA",
+    "LA",
+    "RME",
+    "RLE",
+    "LME",
+    "LLE",
+    "RRAD",
+    "RULN",
+    "LRAD",
+    "LULN",
+    "RMC",
+    "RLC",
+    "LMC",
+    "LLC",
+    "RMM",
+    "RLM",
+    "LMM",
+    "LLM",
+    "RMT1",
+    "RMT5",
+    "LMT1",
+    "LMT5",
+]
 from src.tracking import GlobalTrack, TrackState
 
 
@@ -21,6 +60,31 @@ def color_for_id(person_id: int) -> tuple[int, int, int]:
     rng = np.random.default_rng(seed=int(person_id) * 1009)
     color = rng.integers(40, 255, size=3)
     return int(color[0]), int(color[1]), int(color[2])
+
+
+def metasport_color_for_id(person_id: int) -> tuple[int, int, int]:
+    """Couleur BGR dédiée aux points MetaSport32.
+
+    Elle est déterministe par personne, mais volontairement différente de la
+    couleur du squelette custom18 pour éviter de confondre les deux sorties.
+    """
+    custom = np.asarray(color_for_id(person_id), dtype=np.float32)
+    rng = np.random.default_rng(seed=int(person_id) * 3001 + 7919)
+
+    best = rng.integers(40, 255, size=3).astype(np.float32)
+    best_distance = float(np.linalg.norm(best - custom))
+
+    for _ in range(32):
+        candidate = rng.integers(40, 255, size=3).astype(np.float32)
+        distance = float(np.linalg.norm(candidate - custom))
+        if distance > best_distance:
+            best = candidate
+            best_distance = distance
+        if distance >= 160.0:
+            break
+
+    best = np.clip(best, 40, 255).astype(np.uint8)
+    return int(best[0]), int(best[1]), int(best[2])
 
 
 def bgr_to_rgb(color_bgr: tuple[int, int, int]) -> tuple[float, float, float]:
@@ -40,10 +104,9 @@ def has_valid_pose18(track: GlobalTrack) -> bool:
 def track_pose_reliable_for_display(
     track: GlobalTrack,
     min_views: int = 2,
-    min_score: float = 0.01,
+    min_score: float = 0.0,
 ) -> bool:
-    """True si la pose 3D courante est assez fiable pour être affichée
-    """
+
     if not has_valid_pose18(track):
         return False
 
@@ -51,7 +114,9 @@ def track_pose_reliable_for_display(
         return False
 
     score = float(getattr(track, "learned_pose_score", 0.0))
-    if not np.isfinite(score) or score < float(min_score):
+    if not np.isfinite(score):
+        return False
+    if min_score > 0.0 and score < float(min_score):
         return False
 
     return True
@@ -71,8 +136,7 @@ def track_unreliable_pose_for_display(
     min_views: int = 2,
     min_score: float = 0.0,
 ) -> bool:
-    """True si une pose low3D courante peut être affichée en debug
-    """
+
     if not has_valid_unreliable_pose18(track):
         return False
 
@@ -85,6 +149,63 @@ def track_unreliable_pose_for_display(
 
     return True
 
+
+
+def has_valid_metasport32(track: GlobalTrack, unreliable: bool = False) -> bool:
+    if unreliable:
+        pose = getattr(track, "current_unreliable_pose_3d_metasport32", None)
+    else:
+        pose = getattr(track, "current_pose_3d_metasport32", None)
+
+    if pose is None:
+        return False
+
+    pose = np.asarray(pose)
+    return pose.shape == (32, 3) and np.isfinite(pose).all()
+
+
+def get_display_pose18(
+    track: GlobalTrack,
+    reliable_pose: bool,
+    unreliable_pose: bool,
+) -> Optional[np.ndarray]:
+    if reliable_pose and has_valid_pose18(track):
+        return np.asarray(track.current_pose_3d_18, dtype=np.float32)
+
+    if unreliable_pose and has_valid_unreliable_pose18(track):
+        return np.asarray(track.current_unreliable_pose_3d_18, dtype=np.float32)
+
+    return None
+
+
+def get_display_metasport32(
+    track: GlobalTrack,
+    reliable_pose: bool,
+    unreliable_pose: bool,
+) -> Optional[np.ndarray]:
+    if reliable_pose and has_valid_metasport32(track, unreliable=False):
+        return np.asarray(track.current_pose_3d_metasport32, dtype=np.float32)
+
+    if unreliable_pose and has_valid_metasport32(track, unreliable=True):
+        return np.asarray(track.current_unreliable_pose_3d_metasport32, dtype=np.float32)
+
+    return None
+
+
+def visualization_shows_custom18(visualization_mode: str) -> bool:
+    return str(visualization_mode).lower() in {
+        "custom18",
+        "custom18_metasport",
+        "all",
+    }
+
+
+def visualization_shows_metasport32(visualization_mode: str) -> bool:
+    return str(visualization_mode).lower() in {
+        "metasport32",
+        "custom18_metasport",
+        "all",
+    }
 
 
 def track_reliable_detections_for_3d(track: GlobalTrack) -> Dict[str, object]:
@@ -163,6 +284,63 @@ class PoseCsvWriter:
                     float(joint[0]),
                     float(joint[1]),
                     float(joint[2]),
+                ])
+
+            self.writer.writerow(row)
+
+        self.file.flush()
+
+    def close(self) -> None:
+        self.file.close()
+
+
+class MetaSportPoseCsvWriter:
+
+    def __init__(self, output_path: str | Path) -> None:
+        self.output_path = Path(output_path)
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self.file = open(self.output_path, "w", newline="", encoding="utf-8")
+        self.writer = csv.writer(self.file)
+        self.writer.writerow(self.header())
+        self.file.flush()
+
+    def header(self) -> List[str]:
+        header = [
+            "frame_id",
+            "person_id",
+            "views_used",
+            "score",
+        ]
+
+        for marker_name in metasport32_names:
+            header.extend([
+                f"{marker_name}_x",
+                f"{marker_name}_y",
+                f"{marker_name}_z",
+            ])
+
+        return header
+
+    def write_frame(self, frame_id: int, tracks: Iterable[GlobalTrack]) -> None:
+        for track in valid_pose_tracks(tracks):
+            if not has_valid_metasport32(track):
+                continue
+
+            pose = np.asarray(track.current_pose_3d_metasport32, dtype=np.float32)
+
+            row = [
+                int(frame_id),
+                int(track.global_id),
+                "|".join(track.learned_views_used),
+                float(track.learned_pose_score),
+            ]
+
+            for marker in pose:
+                row.extend([
+                    float(marker[0]),
+                    float(marker[1]),
+                    float(marker[2]),
                 ])
 
             self.writer.writerow(row)
@@ -335,6 +513,27 @@ def draw_projected_skeleton(
             cv2.line(image, (xa, ya), (xb, yb), color, 2)
 
 
+def draw_projected_points(
+    image: np.ndarray,
+    points_2d: np.ndarray,
+    color: tuple[int, int, int],
+    radius: int = 3,
+) -> None:
+    height, width = image.shape[:2]
+
+    for point in points_2d:
+        x, y = point
+
+        if not np.isfinite(x) or not np.isfinite(y):
+            continue
+
+        x_i = int(round(float(x)))
+        y_i = int(round(float(y)))
+
+        if 0 <= x_i < width and 0 <= y_i < height:
+            cv2.circle(image, (x_i, y_i), int(radius), color, -1)
+
+
 def draw_reprojection_frame(
     frame_id: int,
     activity_name: str,
@@ -342,6 +541,7 @@ def draw_reprojection_frame(
     cameras_by_camera: Dict[str, CameraData],
     tracks: Iterable[GlobalTrack],
     output_dir: str | Path,
+    visualization_mode: str = "custom18_metasport",
 ) -> None:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -363,6 +563,7 @@ def draw_reprojection_frame(
                 continue
 
             color = color_for_id(track.global_id)
+            metasport_color = metasport_color_for_id(track.global_id)
             reliable_pose = track_pose_reliable_for_display(track)
             unreliable_pose = (not reliable_pose) and track_unreliable_pose_for_display(track)
 
@@ -384,17 +585,33 @@ def draw_reprojection_frame(
                 label=label,
             )
 
-            if reliable_pose:
-                pose18 = np.asarray(track.current_pose_3d_18, dtype=np.float32)
-            elif unreliable_pose:
-                pose18 = np.asarray(track.current_unreliable_pose_3d_18, dtype=np.float32)
-            else:
-                pose18 = None
+            pose18 = get_display_pose18(
+                track=track,
+                reliable_pose=reliable_pose,
+                unreliable_pose=unreliable_pose,
+            )
+            metasport32 = get_display_metasport32(
+                track=track,
+                reliable_pose=reliable_pose,
+                unreliable_pose=unreliable_pose,
+            )
 
-            if pose18 is not None:
+            if visualization_shows_custom18(visualization_mode) and pose18 is not None:
                 try:
                     projected = project_points(pose18, camera.P)
                     draw_projected_skeleton(image, projected, color)
+                except Exception:
+                    pass
+
+            if visualization_shows_metasport32(visualization_mode) and metasport32 is not None:
+                try:
+                    projected_metasport = project_points(metasport32, camera.P)
+                    draw_projected_points(
+                        image=image,
+                        points_2d=projected_metasport,
+                        color=metasport_color,
+                        radius=3,
+                    )
                 except Exception:
                     pass
 
@@ -424,6 +641,10 @@ def compute_scene_limits(
     for track in valid_pose_tracks(tracks):
         pose = np.asarray(track.current_pose_3d_18, dtype=np.float32)
         points.append(pose)
+
+        if has_valid_metasport32(track):
+            metasport = np.asarray(track.current_pose_3d_metasport32, dtype=np.float32)
+            points.append(metasport)
 
     if not points:
         return None
@@ -475,9 +696,7 @@ def get_activity_axis_limits(
     tracks: Iterable[GlobalTrack],
     allow_expand: bool = False,
 ) -> Optional[Dict[str, tuple[float, float]]]:
-    """
-    Retourne des limites fixes par activité
-    """
+
     tracks = list(tracks)
     cached = _ACTIVITY_AXIS_LIMITS.get(activity_name)
     current = compute_scene_limits(tracks)
@@ -496,7 +715,6 @@ def get_activity_axis_limits(
 
 
 def reset_activity_axis_limits(activity_name: Optional[str] = None) -> None:
-    """Permet de réinitialiser le cache si besoin entre deux traitements."""
     if activity_name is None:
         _ACTIVITY_AXIS_LIMITS.clear()
         return
@@ -509,8 +727,6 @@ def draw_ground_reference(
     axis_limits: Dict[str, tuple[float, float]],
     grid_step: float = 500.0,
 ) -> None:
-    """Dessine une grille simple au sol dans le plan X-Y
-    """
     x_min, x_max = axis_limits["x"]
     y_min, y_max = axis_limits["y"]
     z_min, z_max = axis_limits["z"]
@@ -551,12 +767,133 @@ def draw_ground_reference(
         )
 
 
+def _label_for_point(
+    index: int,
+    names: List[str],
+    prefix: str,
+    mode: str,
+) -> str:
+    mode = str(mode).lower()
+    name = names[index] if 0 <= int(index) < len(names) else str(index)
+
+    if mode == "name":
+        return name
+
+    if mode in {"index_name", "number_name", "both"}:
+        return f"{prefix}{index}: {name}"
+
+    return f"{prefix}{index}"
+
+
+def annotate_3d_points(
+    ax,
+    points: np.ndarray,
+    names: List[str],
+    prefix: str,
+    color,
+    mode: str = "index",
+    fontsize: float = 6.0,
+    z_offset: float = 25.0,
+) -> None:
+    points = np.asarray(points, dtype=np.float32)
+
+    if points.ndim != 2 or points.shape[1] != 3:
+        return
+
+    for index, point in enumerate(points):
+        if not np.isfinite(point).all():
+            continue
+
+        label = _label_for_point(
+            index=index,
+            names=names,
+            prefix=prefix,
+            mode=mode,
+        )
+
+        ax.text(
+            float(point[0]),
+            float(point[1]),
+            float(point[2]) + float(z_offset),
+            label,
+            color=color,
+            fontsize=float(fontsize),
+        )
+
+
+def _joint_legend_items(
+    show_custom18: bool,
+    show_metasport32: bool,
+) -> List[str]:
+    items: List[str] = []
+
+    if show_custom18:
+        items.append("Custom18")
+        items.extend([
+            f"C{index}: {name}"
+            for index, name in enumerate(joint_names_18)
+        ])
+
+    if show_metasport32:
+        if items:
+            items.append("")
+        items.append("MetaSport32")
+        items.extend([
+            f"M{index}: {name}"
+            for index, name in enumerate(metasport32_names)
+        ])
+
+    return items
+
+
+def add_vis3d_joint_legend(
+    fig,
+    show_custom18: bool,
+    show_metasport32: bool,
+) -> None:
+    items = _joint_legend_items(
+        show_custom18=show_custom18,
+        show_metasport32=show_metasport32,
+    )
+
+    if not items:
+        return
+
+    max_lines_per_column = 24
+    columns = [
+        items[index:index + max_lines_per_column]
+        for index in range(0, len(items), max_lines_per_column)
+    ]
+
+    x0 = 0.655
+    column_width = 0.110
+
+    for column_index, column in enumerate(columns[:3]):
+        fig.text(
+            x0 + column_index * column_width,
+            0.92,
+            "\n".join(column),
+            fontsize=5.8,
+            va="top",
+            ha="left",
+            family="monospace",
+        )
+
+
 def draw_3d_scene_frame(
     frame_id: int,
     activity_name: str,
     tracks: Iterable[GlobalTrack],
     output_dir: str | Path,
     axis_limits: Optional[Dict[str, tuple[float, float]]] = None,
+    visualization_mode: str = "custom18_metasport",
+    show_joint_numbers: bool = False,
+    show_custom18_joint_numbers: Optional[bool] = None,
+    show_metasport_marker_numbers: Optional[bool] = None,
+    show_joint_legend: bool = False,
+    show_person_legend: bool = True,
+    show_person_labels_on_scene: bool = False,
+    joint_label_mode: str = "index",
 ) -> None:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -573,10 +910,28 @@ def draw_3d_scene_frame(
     if axis_limits is None:
         return
 
-    fig = plt.figure(figsize=(8, 8))
+    show_custom18 = visualization_shows_custom18(visualization_mode)
+    show_metasport32 = visualization_shows_metasport32(visualization_mode)
+
+    if show_custom18_joint_numbers is None:
+        show_custom18_joint_numbers = bool(show_joint_numbers)
+
+    if show_metasport_marker_numbers is None:
+        show_metasport_marker_numbers = bool(show_joint_numbers)
+
+    if show_joint_legend or show_person_legend:
+        fig = plt.figure(figsize=(13.5, 8))
+        right_margin = 0.62 if show_joint_legend else 0.82
+    else:
+        fig = plt.figure(figsize=(8, 8))
+        right_margin = 0.98
+
     ax = fig.add_subplot(111, projection="3d")
 
     draw_ground_reference(ax, axis_limits)
+
+    person_handles = []
+    person_labels = set()
 
     if not tracks:
         ax.text(
@@ -589,35 +944,108 @@ def draw_3d_scene_frame(
 
     for track in tracks:
         pose = np.asarray(track.current_pose_3d_18, dtype=np.float32)
-        color = bgr_to_rgb(color_for_id(track.global_id))
+        custom_color = bgr_to_rgb(color_for_id(track.global_id))
+        metasport_color = bgr_to_rgb(metasport_color_for_id(track.global_id))
 
-        ax.scatter(
-            pose[:, 0],
-            pose[:, 1],
-            pose[:, 2],
-            s=35,
-            color=color,
-            depthshade=True,
-        )
+        if show_person_legend:
+            custom_label_key = (track.global_id, "custom18")
+            metasport_label_key = (track.global_id, "metasport32")
 
-        for joint_a, joint_b in skeleton_18:
-            ax.plot(
-                [pose[joint_a, 0], pose[joint_b, 0]],
-                [pose[joint_a, 1], pose[joint_b, 1]],
-                [pose[joint_a, 2], pose[joint_b, 2]],
-                linewidth=2,
-                color=color,
+            if show_custom18 and custom_label_key not in person_labels:
+                person_handles.append(
+                    Line2D(
+                        [0],
+                        [0],
+                        marker="o",
+                        linestyle="-",
+                        color=custom_color,
+                        label=f"ID {track.global_id} custom18",
+                        markersize=6,
+                        linewidth=2,
+                    )
+                )
+                person_labels.add(custom_label_key)
+
+            if show_metasport32 and has_valid_metasport32(track) and metasport_label_key not in person_labels:
+                person_handles.append(
+                    Line2D(
+                        [0],
+                        [0],
+                        marker="o",
+                        linestyle="None",
+                        color=metasport_color,
+                        label=f"ID {track.global_id} MetaSport32",
+                        markersize=5,
+                        linewidth=0,
+                    )
+                )
+                person_labels.add(metasport_label_key)
+
+        if show_custom18:
+            ax.scatter(
+                pose[:, 0],
+                pose[:, 1],
+                pose[:, 2],
+                s=35,
+                color=custom_color,
+                depthshade=True,
             )
 
-        root = pose[pelvis_18_index]
+            for joint_a, joint_b in skeleton_18:
+                ax.plot(
+                    [pose[joint_a, 0], pose[joint_b, 0]],
+                    [pose[joint_a, 1], pose[joint_b, 1]],
+                    [pose[joint_a, 2], pose[joint_b, 2]],
+                    linewidth=2,
+                    color=custom_color,
+                )
 
-        ax.text(
-            float(root[0]),
-            float(root[1]),
-            float(root[2]),
-            f"ID {track.global_id}",
-            color=color,
-        )
+            if show_custom18_joint_numbers:
+                annotate_3d_points(
+                    ax=ax,
+                    points=pose,
+                    names=joint_names_18,
+                    prefix="C",
+                    color=custom_color,
+                    mode=joint_label_mode,
+                    fontsize=6.5,
+                    z_offset=25.0,
+                )
+
+        if show_metasport32 and has_valid_metasport32(track):
+            metasport = np.asarray(track.current_pose_3d_metasport32, dtype=np.float32)
+            ax.scatter(
+                metasport[:, 0],
+                metasport[:, 1],
+                metasport[:, 2],
+                s=18,
+                color=metasport_color,
+                marker="o",
+                alpha=0.90,
+                depthshade=True,
+            )
+
+            if show_metasport_marker_numbers:
+                annotate_3d_points(
+                    ax=ax,
+                    points=metasport,
+                    names=metasport32_names,
+                    prefix="",
+                    color=metasport_color,
+                    mode=joint_label_mode,
+                    fontsize=5.8,
+                    z_offset=18.0,
+                )
+
+        if show_person_labels_on_scene:
+            root = pose[pelvis_18_index]
+            ax.text(
+                float(root[0]),
+                float(root[1]),
+                float(root[2]),
+                f"ID {track.global_id}",
+                color=custom_color,
+            )
 
     ax.set_xlim(*axis_limits["x"])
     ax.set_ylim(*axis_limits["y"])
@@ -637,7 +1065,27 @@ def draw_3d_scene_frame(
 
     ax.view_init(elev=10, azim=18)
 
-    fig.subplots_adjust(left=0.02, right=0.98, bottom=0.02, top=0.92)
+    if show_person_legend and person_handles:
+        legend_loc = "lower left" if show_joint_legend else "upper left"
+        legend_anchor = (1.02, 0.02) if show_joint_legend else (1.02, 1.00)
+        ax.legend(
+            handles=person_handles,
+            title="Persons",
+            loc=legend_loc,
+            bbox_to_anchor=legend_anchor,
+            borderaxespad=0.0,
+            fontsize=8,
+            title_fontsize=9,
+        )
+
+    if show_joint_legend:
+        add_vis3d_joint_legend(
+            fig=fig,
+            show_custom18=show_custom18,
+            show_metasport32=show_metasport32,
+        )
+
+    fig.subplots_adjust(left=0.02, right=right_margin, bottom=0.02, top=0.92)
 
     output_path = (
         output_dir
@@ -982,7 +1430,6 @@ class TrackingEvalCsvWriter:
                 is_predicted_bbox = int(not has_real_detection)
                 score = 1.0 if has_real_detection else 0.5
 
-                # MOT: seulement les tracks confirmées avec une vraie détection.
                 if (
                     track.state in {TrackState.confirmed_2d, TrackState.confirmed_3d}
                     and has_real_detection
@@ -1080,6 +1527,8 @@ class ActivityOutputs:
         camera_names: Optional[List[str]] = None,
         save_debug_exports: bool = True,
         save_unreliable_pose_csv: bool = False,
+        save_metasport_eval_csv: bool = False,
+        save_metasport_pose_csv: bool = False,
     ) -> None:
         self.activity_name = activity_name
         self.csv_dir = Path(csv_dir)
@@ -1087,6 +1536,7 @@ class ActivityOutputs:
 
         self.pose_writer: Optional[PoseCsvWriter] = None
         self.unreliable_pose_writer: Optional[UnreliablePoseCsvWriter] = None
+        self.metasport_pose_writer: Optional[MetaSportPoseCsvWriter] = None
         self.failure_writer: Optional[FailureCsvWriter] = None
         self.detection_eval_writer: Optional[DetectionEvalCsvWriter] = None
         self.tracking_eval_writer: Optional[TrackingEvalCsvWriter] = None
@@ -1099,6 +1549,11 @@ class ActivityOutputs:
         if save_unreliable_pose_csv:
             self.unreliable_pose_writer = UnreliablePoseCsvWriter(
                 self.debug_dir / f"{activity_name}_unreliable_poses_low3d.csv"
+            )
+
+        if save_metasport_eval_csv or save_metasport_pose_csv:
+            self.metasport_pose_writer = MetaSportPoseCsvWriter(
+                self.csv_dir / f"{activity_name}_metasport32_multiperson.csv"
             )
 
         if save_failures:
@@ -1126,7 +1581,11 @@ class ActivityOutputs:
         if self.pose_writer is None:
             return
 
+        tracks = list(tracks)
         self.pose_writer.write_frame(frame_id, tracks)
+
+        if self.metasport_pose_writer is not None:
+            self.metasport_pose_writer.write_frame(frame_id, tracks)
 
     def write_unreliable_pose(
         self,
@@ -1189,6 +1648,9 @@ class ActivityOutputs:
         if self.unreliable_pose_writer is not None:
             self.unreliable_pose_writer.close()
 
+        if self.metasport_pose_writer is not None:
+            self.metasport_pose_writer.close()
+
         if self.failure_writer is not None:
             self.failure_writer.close()
 
@@ -1205,6 +1667,7 @@ def draw_annotated_video_frame(
     frame: np.ndarray,
     camera: CameraData,
     tracks: Iterable[GlobalTrack],
+    visualization_mode: str = "custom18_metasport",
 ) -> np.ndarray:
     image = frame.copy()
 
@@ -1227,6 +1690,7 @@ def draw_annotated_video_frame(
             continue
 
         color = color_for_id(track.global_id)
+        metasport_color = metasport_color_for_id(track.global_id)
         reliable_pose = track_pose_reliable_for_display(track)
         unreliable_pose = (not reliable_pose) and track_unreliable_pose_for_display(track)
 
@@ -1247,20 +1711,36 @@ def draw_annotated_video_frame(
             label=label,
         )
 
-        if reliable_pose:
-            pose18 = np.asarray(track.current_pose_3d_18, dtype=np.float32)
-        elif unreliable_pose:
-            pose18 = np.asarray(track.current_unreliable_pose_3d_18, dtype=np.float32)
-        else:
-            pose18 = None
+        pose18 = get_display_pose18(
+            track=track,
+            reliable_pose=reliable_pose,
+            unreliable_pose=unreliable_pose,
+        )
+        metasport32 = get_display_metasport32(
+            track=track,
+            reliable_pose=reliable_pose,
+            unreliable_pose=unreliable_pose,
+        )
 
-        if pose18 is not None:
+        if visualization_shows_custom18(visualization_mode) and pose18 is not None:
             try:
                 projected = project_points(pose18, camera.P)
                 draw_projected_skeleton(
                     image=image,
                     points_2d=projected,
-                    color=(255, 0, 0),
+                    color=color,
+                )
+            except Exception:
+                pass
+
+        if visualization_shows_metasport32(visualization_mode) and metasport32 is not None:
+            try:
+                projected_metasport = project_points(metasport32, camera.P)
+                draw_projected_points(
+                    image=image,
+                    points_2d=projected_metasport,
+                    color=metasport_color,
+                    radius=3,
                 )
             except Exception:
                 pass
@@ -1322,12 +1802,14 @@ class ActivityVideoWriters:
         frame_size_by_camera: dict[str, tuple[int, int]],
         output_size: tuple[int, int] | None = None,
         codec: str = "mp4v",
+        visualization_mode: str = "custom18_metasport",
     ) -> None:
         self.activity_name = activity_name
         self.camera_names = list(camera_names)
         self.video_output_dir = Path(video_output_dir)
         self.output_size = output_size
         self.codec = codec
+        self.visualization_mode = str(visualization_mode)
 
         self.writers: dict[str, cv2.VideoWriter] = {}
         self.paths: dict[str, Path] = {}
@@ -1377,6 +1859,7 @@ class ActivityVideoWriters:
                 frame=frames_by_camera[camera_name],
                 camera=cameras_by_camera[camera_name],
                 tracks=tracks,
+                visualization_mode=self.visualization_mode,
             )
 
             if self.output_size is not None:

@@ -730,8 +730,6 @@ class SingleCameraDetector:
         self.use_torso_crop = use_torso_crop
         self.bbox_margin_ratio = bbox_margin_ratio
 
-        # Données de debug de la dernière frame traitée.
-        # Elles servent à écrire des CSV d'évaluation sans dépendre de la console.
         self.last_raw_yolo_debug: List[Dict[str, object]] = []
         self.last_detection_counts: Dict[str, int] = {
             "raw_yolo": 0,

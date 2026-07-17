@@ -551,13 +551,21 @@ class GlobalTrack:
     mean_3d: Optional[np.ndarray] = None
     covariance_3d: Optional[np.ndarray] = None
 
+    current_pose_3d_83: Optional[np.ndarray] = None
     current_pose_3d_19: Optional[np.ndarray] = None
+    current_pose_3d_custom19: Optional[np.ndarray] = None
     current_pose_3d_18: Optional[np.ndarray] = None
+    current_pose_3d_metasport32: Optional[np.ndarray] = None
+    current_pose_3d_ecomocap32: Optional[np.ndarray] = None
     learned_pose_score: float = 0.0
     learned_views_used: List[str] = field(default_factory=list)
 
+    current_unreliable_pose_3d_83: Optional[np.ndarray] = None
     current_unreliable_pose_3d_19: Optional[np.ndarray] = None
+    current_unreliable_pose_3d_custom19: Optional[np.ndarray] = None
     current_unreliable_pose_3d_18: Optional[np.ndarray] = None
+    current_unreliable_pose_3d_metasport32: Optional[np.ndarray] = None
+    current_unreliable_pose_3d_ecomocap32: Optional[np.ndarray] = None
     unreliable_pose_score: float = 0.0
     unreliable_views_used: List[str] = field(default_factory=list)
     unreliable_pose_reason: str = ""
@@ -599,12 +607,20 @@ class GlobalTrack:
         self.current_pose_2d.clear()
         self.current_joint_confidences.clear()
 
+        self.current_pose_3d_83 = None
         self.current_pose_3d_19 = None
+        self.current_pose_3d_custom19 = None
         self.current_pose_3d_18 = None
+        self.current_pose_3d_metasport32 = None
+        self.current_pose_3d_ecomocap32 = None
         self.learned_pose_score = 0.0
         self.learned_views_used = []
+        self.current_unreliable_pose_3d_83 = None
         self.current_unreliable_pose_3d_19 = None
+        self.current_unreliable_pose_3d_custom19 = None
         self.current_unreliable_pose_3d_18 = None
+        self.current_unreliable_pose_3d_metasport32 = None
+        self.current_unreliable_pose_3d_ecomocap32 = None
         self.unreliable_pose_score = 0.0
         self.unreliable_views_used = []
         self.unreliable_pose_reason = ""
@@ -682,9 +698,28 @@ class GlobalTrack:
         root_position: np.ndarray,
         score: float,
         views_used: List[str],
+        pose_3d_83: Optional[np.ndarray] = None,
+        pose_3d_custom19: Optional[np.ndarray] = None,
+        pose_3d_metasport32: Optional[np.ndarray] = None,
+        pose_3d_ecomocap32: Optional[np.ndarray] = None,
     ) -> None:
-        self.current_pose_3d_19 = pose_3d_19
-        self.current_pose_3d_18 = pose_3d_18
+        if pose_3d_custom19 is None:
+            pose_3d_custom19 = pose_3d_19
+
+        self.current_pose_3d_83 = None if pose_3d_83 is None else np.asarray(pose_3d_83, dtype=np.float32)
+        self.current_pose_3d_19 = np.asarray(pose_3d_19, dtype=np.float32)
+        self.current_pose_3d_custom19 = np.asarray(pose_3d_custom19, dtype=np.float32)
+        self.current_pose_3d_18 = np.asarray(pose_3d_18, dtype=np.float32)
+        self.current_pose_3d_metasport32 = (
+            None
+            if pose_3d_metasport32 is None
+            else np.asarray(pose_3d_metasport32, dtype=np.float32)
+        )
+        self.current_pose_3d_ecomocap32 = (
+            None
+            if pose_3d_ecomocap32 is None
+            else np.asarray(pose_3d_ecomocap32, dtype=np.float32)
+        )
         self.learned_pose_score = float(score)
         self.learned_views_used = list(views_used)
 
@@ -710,14 +745,37 @@ class GlobalTrack:
         score: float,
         views_used: List[str],
         reason: str,
+        pose_3d_83: Optional[np.ndarray] = None,
+        pose_3d_custom19: Optional[np.ndarray] = None,
+        pose_3d_metasport32: Optional[np.ndarray] = None,
+        pose_3d_ecomocap32: Optional[np.ndarray] = None,
     ) -> None:
-        """Stocke une pose learned non fiable pour l'affichage/debug.
-        """
-        self.current_unreliable_pose_3d_19 = pose_3d_19
-        self.current_unreliable_pose_3d_18 = pose_3d_18
+        if pose_3d_custom19 is None:
+            pose_3d_custom19 = pose_3d_19
+
+        self.current_unreliable_pose_3d_83 = (
+            None
+            if pose_3d_83 is None
+            else np.asarray(pose_3d_83, dtype=np.float32)
+        )
+        self.current_unreliable_pose_3d_19 = np.asarray(pose_3d_19, dtype=np.float32)
+        self.current_unreliable_pose_3d_custom19 = np.asarray(pose_3d_custom19, dtype=np.float32)
+        self.current_unreliable_pose_3d_18 = np.asarray(pose_3d_18, dtype=np.float32)
+        self.current_unreliable_pose_3d_metasport32 = (
+            None
+            if pose_3d_metasport32 is None
+            else np.asarray(pose_3d_metasport32, dtype=np.float32)
+        )
+        self.current_unreliable_pose_3d_ecomocap32 = (
+            None
+            if pose_3d_ecomocap32 is None
+            else np.asarray(pose_3d_ecomocap32, dtype=np.float32)
+        )
         self.unreliable_pose_score = float(score)
         self.unreliable_views_used = list(views_used)
         self.unreliable_pose_reason = str(reason)
+
+
 class AssociationDebugWriter:
     def __init__(self, output_path: str | Path | None) -> None:
         self.output_path = Path(output_path) if output_path is not None else None
@@ -933,6 +991,18 @@ class MultiViewTracker:
         self.crowded_single_view_penalty = 0.25
 
         self.require_reliable_views_for_tracking_3d = True
+
+        self.strong_spatial_override_score = 0.85
+        self.appearance_veto_distance = 0.60
+
+        self.close_3d_merge_enabled = True
+        self.close_3d_merge_hard_mm = 200.0
+        self.close_3d_merge_soft_mm = 400.0
+        self.close_3d_merge_soft_appearance = 0.40
+
+        self.multiview_consistency_use_torso_joints = True
+        self.consistency_min_joint_conf = 0.30
+        self.consistency_min_joints = 2
 
     def close(self) -> None:
         self.debug_writer.close()
@@ -1206,6 +1276,69 @@ class MultiViewTracker:
 
         return point_3d.astype(np.float32), confidence
 
+    def multiview_pose_consistency_score(
+        self,
+        merged: "DetectionGroup",
+        cameras_by_camera: Optional[Dict[str, CameraData]],
+    ) -> Optional[float]:
+        if cameras_by_camera is None:
+            return None
+
+        torso_indices = [5, 6, 11, 12]  
+        all_errors: List[float] = []
+        joints_used = 0
+
+        for joint_index in torso_indices:
+            projs: List[np.ndarray] = []
+            pts: List[np.ndarray] = []
+            weights: List[float] = []
+            cams: List[CameraData] = []
+
+            for detection in merged.detections:
+                pose = detection.pose_2d
+                confs = detection.joint_confidences
+                if pose is None or confs is None:
+                    continue
+                if joint_index >= len(pose) or joint_index >= len(confs):
+                    continue
+                conf = float(confs[joint_index])
+                if conf < self.consistency_min_joint_conf:
+                    continue
+                point = np.asarray(pose[joint_index], dtype=np.float64)
+                if not np.isfinite(point).all():
+                    continue
+                camera = cameras_by_camera.get(detection.camera_name)
+                if camera is None:
+                    continue
+                projs.append(camera.P)
+                pts.append(point)
+                weights.append(conf)
+                cams.append(camera)
+
+            if len(projs) < 2:
+                continue
+
+            try:
+                point_3d = weighted_triangulate_point(projs, pts, weights)
+            except Exception:
+                continue
+
+            if sum(check_cheirality(point_3d, cam) for cam in cams) < 2:
+                continue
+
+            for projection, point_2d in zip(projs, pts):
+                projected = project_points(point_3d.reshape(1, 3), projection)[0]
+                all_errors.append(float(np.linalg.norm(projected - point_2d)))
+            joints_used += 1
+
+        if joints_used < self.consistency_min_joints or not all_errors:
+            return None
+
+        mean_error = float(np.mean(all_errors))
+        if mean_error > self.reprojection_error_threshold:
+            return 0.0
+        return max(0.0, 1.0 - mean_error / max(1e-6, self.reprojection_error_threshold))
+
     def spatial_consistency_score(
         self,
         group_a: DetectionGroup,
@@ -1216,6 +1349,12 @@ class MultiViewTracker:
             return 0.0
 
         merged = DetectionGroup(group_a.detections + group_b.detections)
+
+        if getattr(self, "multiview_consistency_use_torso_joints", True):
+            multi = self.multiview_pose_consistency_score(merged, cameras_by_camera)
+            if multi is not None:
+                return float(multi)
+
         result = self.triangulate_group(merged, cameras_by_camera)
 
         if result is None:
@@ -1252,6 +1391,12 @@ class MultiViewTracker:
                 cdist([det_a.feature], [det_b.feature], metric="cosine")[0, 0]
             )
 
+            if (
+                spatial_score >= self.strong_spatial_override_score
+                and appearance_cost <= self.appearance_veto_distance
+            ):
+                return float(1.0 - spatial_score)
+
             if spatial_score > 0:
                 return 0.5 * appearance_cost + 0.5 * (1.0 - spatial_score)
 
@@ -1271,8 +1416,7 @@ class MultiViewTracker:
         max_final_score: float = 0.30,
         ambiguity_margin: float = 0.20,
     ) -> Optional[tuple[int, float]]:
-        """Return (global_id, score) only for a very confident local owner
-        """
+
         camera_name = detection.camera_name
 
         if detection.confidence < self.min_detection_confidence_for_matching:
@@ -1366,8 +1510,6 @@ class MultiViewTracker:
         detections: List[ViewDetection],
         duplicate_margin: float = 0.10,
     ) -> Dict[int, int]:
-        """Build dynamic per-detection locks for the current frame
-        """
         if not self.local_continuity_lock_enabled:
             return {}
 
@@ -1436,8 +1578,6 @@ class MultiViewTracker:
         max_motion_score: float = 0.65,
         max_appearance_score: float = 0.55,
     ) -> bool:
-        """Check if an unlocked detection can safely join a locked owner's group
-        """
         track = self.tracks.get(int(owner_global_id))
 
         if track is None or track.state == TrackState.lost:
@@ -1584,8 +1724,6 @@ class MultiViewTracker:
         track: GlobalTrack,
         detection: ViewDetection,
     ) -> Optional[float]:
-        """Score whether a detection is probably a duplicate of an existing track
-        """
         if track.state == TrackState.lost:
             return None
 
@@ -1738,8 +1876,6 @@ class MultiViewTracker:
         self,
         group: DetectionGroup,
     ) -> bool:
-        """Return True when the duplicate/occlusion absorber is safe
-        """
         if group.num_views <= 1:
             return True
 
@@ -1751,8 +1887,6 @@ class MultiViewTracker:
         frame_id: int,
         cameras_by_camera: Optional[Dict[str, CameraData]],
     ) -> Optional[GlobalTrack]:
-        """Handle unmatched groups that are likely duplicate/partial boxes
-        """
         if not self.duplicate_absorption_allowed_for_group(group):
             self.debug_writer.write(
                 frame_id=frame_id,
@@ -2214,8 +2348,6 @@ class MultiViewTracker:
         max_final_score: float = 0.42,
         ambiguity_margin: float = 0.12,
     ) -> Optional[tuple[int, float]]:
-        """Detect when a group is locally owned by another existing track
-        """
         own_support = 0
         foreign_support: Dict[int, float] = {}
 
@@ -2945,8 +3077,6 @@ class MultiViewTracker:
         detection: ViewDetection,
         frame_id: int,
     ) -> None:
-        """Ajoute une vraie détection dans une caméra manquante
-        """
         camera_name = detection.camera_name
 
         track.current_detections[camera_name] = detection
@@ -2987,8 +3117,6 @@ class MultiViewTracker:
         max_motion_score: float = 0.95,
         max_appearance_score: float = 0.55,
     ) -> bool:
-        """Vérifie si une détection peut compléter une caméra manquante
-        """
         if detection.confidence < self.min_detection_confidence_for_matching:
             return False
 
@@ -3047,8 +3175,6 @@ class MultiViewTracker:
         group: DetectionGroup,
         frame_id: int,
     ) -> int:
-        """Complète une track déjà matchée avec les vues réelles manquantes
-        """
         added = 0
 
         for detection in group.detections:
@@ -3074,8 +3200,6 @@ class MultiViewTracker:
         track: GlobalTrack,
         group: DetectionGroup,
     ) -> bool:
-        """True when a local ByteTrack id was recently owned by another global id
-        """
         for detection in group.detections:
             if detection.tracklet_id is None:
                 continue
@@ -3127,8 +3251,6 @@ class MultiViewTracker:
         self,
         detection: ViewDetection,
     ) -> List[tuple[ViewDetection, float, float, float, float]]:
-        """Return large overlapping detections in the same camera
-        """
         if not self.partial_occlusion_handling_enabled:
             return []
 
@@ -3174,8 +3296,6 @@ class MultiViewTracker:
         self,
         detection: ViewDetection,
     ) -> bool:
-        """True for partial/intermittent detections behind a larger bbox
-        """
         candidates = self.detection_occluder_candidates(detection)
         if not candidates:
             return False
@@ -3230,8 +3350,6 @@ class MultiViewTracker:
         track: GlobalTrack,
         group: DetectionGroup,
     ) -> bool:
-        """True when track currently has a real larger bbox over this group
-        """
         for detection in group.detections:
             camera_name = detection.camera_name
             if camera_name not in track.current_detections:
@@ -3262,8 +3380,6 @@ class MultiViewTracker:
         self,
         group: DetectionGroup,
     ) -> bool:
-        """Avoid creating a fresh ID from a risky partial occlusion group.
-        """
         if not self.group_is_partial_occlusion_candidate(group):
             return False
 
@@ -3301,8 +3417,6 @@ class MultiViewTracker:
         frame_id: int,
         cameras_by_camera: Optional[Dict[str, CameraData]],
     ) -> Optional[GlobalTrack]:
-        """Recover an intermittent person behind an occluder without new IDs.
-        """
         if not self.group_is_partial_occlusion_candidate(group):
             return None
 
@@ -3476,8 +3590,6 @@ class MultiViewTracker:
         frame_id: int,
         cameras_by_camera: Optional[Dict[str, CameraData]],
     ) -> Optional[GlobalTrack]:
-        """Attache une vue mono-caméra à une track déjà matchée ailleurs
-        """
         if group.num_views != 1 or not group.detections:
             return None
 
@@ -3647,8 +3759,6 @@ class MultiViewTracker:
         group: DetectionGroup,
         cameras_by_camera: Optional[Dict[str, CameraData]],
     ) -> bool:
-        """Évite de confirmer trop vite des IDs mono-vue parasites
-        """
         if group.num_views != 1:
             return False
 
@@ -3729,8 +3839,6 @@ class MultiViewTracker:
         group: DetectionGroup,
         cameras_by_camera: Optional[Dict[str, CameraData]],
     ) -> Optional[float]:
-        """Score whether an unmatched group may still be an existing track
-        """
         if track.state == TrackState.lost:
             return None
 
@@ -3789,8 +3897,6 @@ class MultiViewTracker:
         group: DetectionGroup,
         cameras_by_camera: Optional[Dict[str, CameraData]],
     ) -> bool:
-        """Return True when a new ID would likely be a duplicate
-        """
         if not self.defer_new_track_if_recent_track_possible:
             return False
 
@@ -3847,8 +3953,6 @@ class MultiViewTracker:
         track: GlobalTrack,
         frame_id: int,
     ) -> None:
-        """Keep the same ID visible briefly using Kalman-predicted bboxes
-        """
         if not self.predicted_display_enabled:
             return
 
@@ -3883,8 +3987,6 @@ class MultiViewTracker:
         track: GlobalTrack,
         frame_id: int,
     ) -> None:
-        """Affichage Kalman court pour une caméra manquante seulement
-        """
         if not self.per_camera_predicted_display_enabled:
             return
 
@@ -3930,8 +4032,6 @@ class MultiViewTracker:
         frame_id: int,
         cameras_by_camera: Optional[Dict[str, CameraData]],
     ) -> Optional[GlobalTrack]:
-        """Conservative rescue before creating a new global ID
-        """
         if group.mean_confidence < self.min_detection_confidence_for_matching:
             return None
 
@@ -4319,8 +4419,6 @@ class MultiViewTracker:
         frame_id: int,
         cameras_by_camera: Optional[Dict[str, CameraData]],
     ) -> Optional[GlobalTrack]:
-        """Réactive une ancienne track seulement avec une vraie continuité
-        """
         if group.mean_confidence < self.min_detection_confidence_for_matching:
             return None
 
@@ -4619,7 +4717,6 @@ class MultiViewTracker:
 
 
     def stable_active_tracks(self) -> List[GlobalTrack]:
-        """Tracks that are established enough to be protected from new IDs/merges."""
         return [
             track
             for track in self.active_tracks()
@@ -5030,6 +5127,20 @@ class MultiViewTracker:
         if score is None:
             return None
 
+        if (
+            track_a.has_3d
+            and track_b.has_3d
+            and track_a.mean_3d is not None
+            and track_b.mean_3d is not None
+        ):
+            distance_3d = float(
+                np.linalg.norm(track_a.mean_3d[:3] - track_b.mean_3d[:3])
+            )
+            if distance_3d > getattr(
+                self, "occlusion_merge_max_3d_distance_mm", 700.0
+            ):
+                return None
+
         stable_a = (
             track_a.hits >= max(8, self.min_hits_to_confirm)
             and (self.current_frame_id - track_a.first_seen_frame) >= 30
@@ -5039,11 +5150,7 @@ class MultiViewTracker:
             and (self.current_frame_id - track_b.first_seen_frame) >= 30
         )
 
-        if stable_a and stable_b:
-            return None
-
-        if self.current_frame_multiview_group_count >= 2:
-            return None
+        _ = (stable_a, stable_b)
 
         ghost_a = (
             track_a.state == TrackState.occluded
@@ -5088,8 +5195,6 @@ class MultiViewTracker:
         keep: GlobalTrack,
         remove: GlobalTrack,
     ) -> None:
-        """Merge remove into keep while preserving the stable global_id
-        """
         keep.last_seen_frame = max(keep.last_seen_frame, remove.last_seen_frame)
         keep.hits = max(keep.hits, remove.hits)
         keep.age = max(keep.age, remove.age)
@@ -5143,9 +5248,6 @@ class MultiViewTracker:
             del self.tracks[remove.global_id]
 
     def merge_occlusion_duplicate_tracks(self) -> None:
-        if self.current_frame_multiview_group_count >= 2:
-            return
-
         tracks = self.active_tracks()
         merges: List[tuple[GlobalTrack, GlobalTrack, float]] = []
 
@@ -5161,7 +5263,6 @@ class MultiViewTracker:
 
                 keep, remove, score = decision
 
-                # Avoid scheduling a track twice.
                 if any(remove.global_id == existing_remove.global_id for _, existing_remove, _ in merges):
                     continue
                 if any(keep.global_id == existing_remove.global_id for _, existing_remove, _ in merges):
@@ -5194,8 +5295,6 @@ class MultiViewTracker:
             )
 
     def suppress_predicted_ghost_boxes(self) -> None:
-        """Masque uniquement les bbox prédites qui tombent sur une vraie bbox
-        """
         if not self.suppress_predicted_ghost_enabled:
             return
 
@@ -5269,6 +5368,82 @@ class MultiViewTracker:
                     total_cost=float(_score),
                     decision="suppressed",
                     reason=f"predicted_ghost_masked_by_{real_id}",
+                )
+
+    def merge_close_3d_duplicate_tracks(self) -> None:
+        if not getattr(self, "close_3d_merge_enabled", True):
+            return
+
+        tracks = [
+            track
+            for track in self.active_tracks()
+            if track.has_3d and track.mean_3d is not None
+        ]
+
+        merged_ids: set[int] = set()
+
+        for i in range(len(tracks)):
+            for j in range(i + 1, len(tracks)):
+                track_a = tracks[i]
+                track_b = tracks[j]
+
+                if track_a.global_id in merged_ids or track_b.global_id in merged_ids:
+                    continue
+
+                shared = set(track_a.current_detections) & set(track_b.current_detections)
+                clearly_different = False
+                for camera_name in shared:
+                    det_a = track_a.current_detections.get(camera_name)
+                    det_b = track_b.current_detections.get(camera_name)
+                    if det_a is not None and det_b is not None:
+                        if self.detections_pose_centers_clearly_different(det_a, det_b):
+                            clearly_different = True
+                            break
+                if clearly_different:
+                    continue
+
+                distance = float(
+                    np.linalg.norm(track_a.mean_3d[:3] - track_b.mean_3d[:3])
+                )
+
+                if distance > self.close_3d_merge_soft_mm:
+                    continue
+
+                do_merge = False
+                if distance <= self.close_3d_merge_hard_mm:
+                    do_merge = True
+                else:
+                    app = self.gallery_distance_between_tracks(track_a, track_b)
+                    if app is None or app <= self.close_3d_merge_soft_appearance:
+                        do_merge = True
+
+                if not do_merge:
+                    continue
+
+                if track_a.first_seen_frame <= track_b.first_seen_frame:
+                    keep, remove = track_a, track_b
+                else:
+                    keep, remove = track_b, track_a
+
+                removed_id = remove.global_id
+                self.absorb_track(keep, remove)
+                merged_ids.add(removed_id)
+                print(
+                    f"[tracking] fusion doublon 3D {removed_id} -> {keep.global_id} "
+                    f"dist={distance:.0f}mm"
+                )
+
+                self.debug_writer.write(
+                    frame_id=self.current_frame_id,
+                    track_id=keep.global_id,
+                    group_index=-1,
+                    group_views=sorted(set(keep.current_bbox.keys())),
+                    app_cost=0.0,
+                    motion_cost=0.0,
+                    spatial_cost=float(distance),
+                    total_cost=float(distance),
+                    decision="accepted",
+                    reason=f"close_3d_duplicate_merge_removed_{removed_id}",
                 )
 
     def merge_duplicate_tracks(self) -> None:
@@ -5443,7 +5618,14 @@ class MultiViewTracker:
             matched_tracks,
         )
 
-        for group_index in unmatched_group_indices:
+        ordered_unmatched_group_indices = list(unmatched_group_indices)
+        if getattr(self, "process_unmatched_groups_by_views_first", True):
+            ordered_unmatched_group_indices.sort(
+                key=lambda idx: groups[idx].num_views,
+                reverse=True,
+            )
+
+        for group_index in ordered_unmatched_group_indices:
             self.create_track(
                 groups[group_index],
                 frame_id,
@@ -5455,6 +5637,7 @@ class MultiViewTracker:
         self.update_occlusion_state()
 
         self.merge_occlusion_duplicate_tracks()
+        self.merge_close_3d_duplicate_tracks()
         self.suppress_predicted_ghost_boxes()
 
         if frame_id % 30 == 0:

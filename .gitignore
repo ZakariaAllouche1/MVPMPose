@@ -338,6 +338,15 @@ labels
 *.xcp
 *.json
 *.npy
+*.prot
+*.var
+*.mod
+*.c3d
+*.mat
+*.pth
+*.onnx
+*.trc
+
 # --- Autoriser les données prétraitées ---
 !data/preprocessed/
 !data/preprocessed/**

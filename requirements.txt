@@ -16,3 +16,4 @@ matplotlib==3.8.0
 tqdm==4.66.1
 motmetrics==1.4.0
 pycolmap==4.0.3
+easydict==1.13
